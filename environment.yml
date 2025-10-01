@@ -1,0 +1,56 @@
+name: guided_af3
+channels:
+  - conda-forge
+  - nvidia
+  - defaults
+
+dependencies:
+  # Core scientific stack
+  - python=3.11
+  - numpy==1.26.3
+  - scipy==1.15.1
+  - pandas==2.2.3
+  - matplotlib==3.9.2
+  - tqdm==4.67.1
+  - pyyaml==6.0.2
+  - ipywidgets==8.1.5
+  - biopython==1.83
+  - biotite==1.0.1
+  - modelcif==0.7
+  - gemmi==0.6.5
+  - rdkit==2023.9.6
+  - py3dmol==2.4.2
+  - ml-collections==1.0.0
+  - dm-tree==0.1.8
+  - scikit-learn==1.6.1
+  - scikit-learn-extra==0.3.0
+  - pdbfixer==1.9.0
+  - openmm==8.0
+
+  # Torch
+  - pytorch==2.3.1
+  - torchvision==0.18.1
+  - torchaudio==2.3.1
+  - pytorch-cuda=12.1
+
+  # Use pip for packages not on conda-forge
+  - pip
+  - pip:
+      # From original environment.yml
+      - pdbeccdutils==0.8.5
+      - pydantic==2.10.6
+      - triton==2.3.1
+      - icecream==2.1.4
+      - ipdb==0.13.13
+      - wandb==0.19.4
+      - pykeops==2.3
+      - json==2.0.9
+
+      # AlphaFold3 support
+      - absl-py==1.0.0
+      - dm-haiku==0.0.12
+      - docker==5.0.0
+      - jax==0.4.26
+      - pytest<8.5.0
+      - setuptools<72.0.0
+      - tensorflow-cpu==2.16.1
