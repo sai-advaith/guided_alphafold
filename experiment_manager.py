@@ -13,7 +13,7 @@ import numpy as np
 
 import gemmi
 from src.protenix.metrics.rmsd import self_aligned_rmsd
-from src.utils.pdb_parsing import find_bonded_pairs
+from src.utils.aa_bonded_pairs import find_bonded_pairs
 from src.utils.relaxation import relax_pdb
 
 parser = argparse.ArgumentParser()
@@ -66,10 +66,7 @@ class ExperimentManager:
             )
     
     def _get_loss_function(self):
-        if self.config.loss_function.loss_function_type == "rmsd":
-            rmsd_config = self.config.loss_function.rmsd_loss_function
-            loss_function = MultiRMSDLossFunction(rmsd_config.reference_files, rmsd_config.top_k, rmsd_config.mean_loss_weight, rmsd_config.distance_loss_weight, device=self.device)
-        elif self.config.loss_function.loss_function_type == "density":
+        if self.config.loss_function.loss_function_type == "density":
             density_config = self.config.loss_function.density_loss_function
             loss_function = DensityGuidanceLossFunction(density_config.reference_pdbs, self.config.protein.reference_raw_pdb, self.config.protein.reference_raw_pdb_chain, density_config.density_file, self.config.protein.residue_range, batch_size=self.config.general.batch_size, device=self.device, rmax=self.config.loss_function.density_loss_function.rmax)
         elif self.config.loss_function.loss_function_type == "pairwise":
@@ -100,16 +97,6 @@ class ExperimentManager:
                                                         atom_array=self.model_manager.atom_array,
                                                         device=self.device, 
                                                         iid_loss=noe_config.iid_loss)
-        elif self.config.loss_function.loss_function_type == "epr":
-            epr_config = self.config.loss_function.epr_loss_function
-            loss_function = EPRLossFunction(constraints_file=epr_config.constraints_file,
-                                            atom_array=self.model_manager.atom_array,
-                                            rotamers_statistics_file=epr_config.rotamers_statistics_file,
-                                            rotamers_structures_folder=epr_config.rotamers_structures_folder,
-                                            device=self.device, 
-                                            batch_size=self.config.general.batch_size,
-                                            sample_points=epr_config.sample_points,
-                                                        )
         elif self.config.loss_function.loss_function_type == "relax_times":
             relax_times_config = self.config.loss_function.relax_times_loss_function
             loss_function = RelaxTimesLossFunction(atom_array = self.model_manager.atom_array,
@@ -195,7 +182,7 @@ class ExperimentManager:
             if i < self.config.model_manager.diffusion_N - 1:
                 structures = self.model_manager.get_x_noisy(structures, i + 1)
             structures = structures.detach().clone()
-            if wandb_log is not None:
+            if wandb_log is not None and self.config.wandb.login_key is not None:
                 wandb.log(wandb_log)
         return structures
 
@@ -267,32 +254,32 @@ class ExperimentManager:
         aligned_files = self.align_relaxed_samples(relaxed_files, self.config.protein.reference_pdb, self.config.protein.residue_range, self.device)
         return aligned_files
 
-def main():
-    args = parser.parse_args()
-    file_path = args.configuration_file
-    device = args.device
-    config = load_config(file_path)
-    pipeline = ExperimentManager(config, device)
-    # pipeline.run()
-    # relaxed_files = pipeline.relax_structures(config.loss_function.density_loss_function.bond_max_threshold)
-    relaxed_dir = os.path.join(config.general.output_folder, config.general.name, "diffusion_process", "relaxed")
+# def main():
+#     args = parser.parse_args()
+#     file_path = args.configuration_file
+#     device = args.device
+#     config = load_config(file_path)
+#     pipeline = ExperimentManager(config, device)
+#     # pipeline.run()
+#     # relaxed_files = pipeline.relax_structures(config.loss_function.density_loss_function.bond_max_threshold)
+#     relaxed_dir = os.path.join(config.general.output_folder, config.general.name, "diffusion_process", "relaxed")
 
 
-    # Selection
-    if config.loss_function.loss_function_type == "density":
-        # Phenix and CCP4 setups
-        phenix_setup_sh = config.loss_function.density_loss_function.phenix_env_path
-        ccp4_setup_sh = config.loss_function.density_loss_function.ccp4_env_path
+#     # Selection
+#     if config.loss_function.loss_function_type == "density":
+#         # Phenix and CCP4 setups
+#         phenix_setup_sh = config.loss_function.density_loss_function.phenix_env_path
+#         ccp4_setup_sh = config.loss_function.density_loss_function.ccp4_env_path
 
-        # Start density metrics
-        processor = DensityMetricsProcessor(
-            config=config,
-            relaxed_dir=relaxed_dir,
-            device=device,
-            ccp4_setup_sh=ccp4_setup_sh,
-            phenix_setup_sh=phenix_setup_sh
-        )
-        processor.process_all_metrics()
+#         # Start density metrics
+#         processor = DensityMetricsProcessor(
+#             config=config,
+#             relaxed_dir=relaxed_dir,
+#             device=device,
+#             ccp4_setup_sh=ccp4_setup_sh,
+#             phenix_setup_sh=phenix_setup_sh
+#         )
+#         processor.process_all_metrics()
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

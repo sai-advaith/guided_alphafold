@@ -3,24 +3,18 @@ import numpy as np
 import gemmi
 import os
 from tqdm import tqdm
-from src.losses.density_loss_function import DensityGuidanceLossFunction
-from src.utils.io import get_sampler_pdb_inputs, get_atom_mask, get_non_missing_atom_mask, AMINO_ACID_ATOMS_ORDER, remove_headers
-from src.utils.density_guidance.density_estimator import AtomDensityEstimator
-from src.losses.density_loss_function import SymmetryOperations
-
-from src.utils.phenix_manager import PhenixManager
-from src.utils.ccp4_manager import CCP4Manager
-
 from biotite.structure.io.pdb import PDBFile
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 from typing import List
-import json
-from multiprocessing import Pool
 import shutil
-import json
-from src.utils.process_pipeline_inputs.extract_metadata import aa_map
-from src.utils.io import extract_chain_ligand_water_tensors
+
+from ..utils.process_pipeline_inputs.extract_metadata import aa_map
+from ..utils.io import extract_chain_ligand_water_tensors
+from ..utils.density_guidance.density_estimator import AtomDensityEstimator
+from ..utils.phenix_manager import PhenixManager
+from ..utils.ccp4_manager import CCP4Manager
+from ..utils.io import get_sampler_pdb_inputs, get_atom_mask, get_non_missing_atom_mask, AMINO_ACID_ATOMS_ORDER, remove_headers
+from ..losses.density_loss_function import SymmetryOperations
+from ..losses.density_loss_function import DensityGuidanceLossFunction
 
 def is_water(residue):
     return residue.name in ['HOH', 'WAT'] and residue.het_flag

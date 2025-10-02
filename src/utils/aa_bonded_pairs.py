@@ -138,9 +138,3 @@ def find_bonded_pairs(chain, residue_range):
     
     return bonded_pairs
 
-# if __name__ == "__main__":
-#     import gemmi
-#     chain = gemmi.read_pdb("/nfs/scistore20/bronsgrp/nsellam/proteinx_guidance/temp.pdb")[0][0]
-#     bonds = find_bonded_pairs(chain)
-#     a = 2
-

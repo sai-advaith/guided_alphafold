@@ -1,22 +1,22 @@
 import torch
 import os
 from tqdm import tqdm
-from src.protenix.metrics.rmsd import self_aligned_rmsd
-from src.utils.density_guidance.density_estimator import AtomDensityEstimator
-from src.utils.io import load_pdb_atom_locations, get_sampler_pdb_inputs, delete_hydrogens, extract_chain_ligand_water_tensors, AMINO_ACID_ATOMS_ORDER, remove_headers
 import gemmi
-from src.losses.density_loss_function import get_density_map_voxel_centroids, SymmetryOperations
 import numpy as np
 import gemmi
 from biotite.structure.io.pdb import PDBFile
-from src.utils.relaxation import relax_pdb
-from src.utils.pdb_parsing import find_bonded_pairs
 from typing import List
-from src.utils.process_pipeline_inputs.extract_metadata import aa_map
 from Bio.PDB.Polypeptide import is_aa
 
-from src.utils.phenix_manager import PhenixManager
-from src.utils.ccp4_manager import CCP4Manager
+from ..protenix.metrics.rmsd import self_aligned_rmsd
+from ..utils.density_guidance.density_estimator import AtomDensityEstimator
+from ..utils.io import load_pdb_atom_locations, get_sampler_pdb_inputs, delete_hydrogens, extract_chain_ligand_water_tensors, AMINO_ACID_ATOMS_ORDER, remove_headers
+from ..utils.phenix_manager import PhenixManager
+from ..utils.ccp4_manager import CCP4Manager
+from ..utils.relaxation import relax_pdb
+from ..utils.aa_bonded_pairs import find_bonded_pairs
+from ..utils.process_pipeline_inputs.extract_metadata import aa_map
+from ..losses.density_loss_function import get_density_map_voxel_centroids, SymmetryOperations
 
 def is_water(residue):
     return residue.name in ['HOH', 'WAT'] and residue.het_flag

@@ -188,7 +188,7 @@ class DensityGuidanceLossFunction(AbstractLossFunction):
         fo = fo.clip(0)
         return density_calculation_locations, indexes, fo
 
-    def save_state(self, structures, folder_path):
+    def save_state(self, structures, folder_path, **kwargs):
         with torch.no_grad():
             fc = self.calcualte_fc(structures)
         fc = fc.mean(dim=0)
@@ -268,7 +268,7 @@ class DensityGuidanceLossFunction(AbstractLossFunction):
         fc = fc / std
 
         loss = (0.5 * (fo[None] - fc).abs()).mean(0).sum()
-        print(torch.nn.functional.cosine_similarity(fo[None], fc_clone))
+        # print(torch.nn.functional.cosine_similarity(fo[None], fc_clone)) # Debug line
 
         self.last_loss_value = loss
         self.last_cosine_similarity = torch.nn.functional.cosine_similarity(fo, fc_clone.mean(dim=0)[None]).item()

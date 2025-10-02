@@ -141,7 +141,7 @@ def expand_to_p1(m: gemmi.Ccp4Map) -> gemmi.Ccp4Map:
 
 def expand(m: gemmi.Ccp4Map) -> gemmi.Ccp4Map:
     """
-    Tile a full P1 unit cell m.grid by translations only, NX×NY×NZ times,
+    Tile a full P1 unit cell m.grid by translations only, NX * NY * NZ times,
     but place the original cell in the center of the supercell.
     """
 
@@ -203,35 +203,6 @@ def copy_ccp4map(m: gemmi.Ccp4Map) -> gemmi.Ccp4Map:
     return clone
 
 
-# def get_density_voxel_center_locations(density_map: gemmi.Ccp4Map):
-#     g = density_map.grid
-#     nx, ny, nz = g.nu, g.nv, g.nw
-
-#     # Get voxel-space offset (header words 5, 6, 7)
-#     # These are the starting indices of the grid along each axis
-#     orig_u = density_map.header_i32(5)
-#     orig_v = density_map.header_i32(6)
-#     orig_w = density_map.header_i32(7)
-#     density_map.setup(0)
-
-#     # Grid indices
-#     us = np.arange(nx)
-#     vs = np.arange(ny)
-#     ws = np.arange(nz)
-#     uu, vv, ww = np.meshgrid(us, vs, ws, indexing='ij')
-
-#     # Convert to fractional coordinates using offset and center shift
-#     frac_u = (uu + orig_u + 0.5) / g.nu
-#     frac_v = (vv + orig_v + 0.5) / g.nv
-#     frac_w = (ww + orig_w + 0.5) / g.nw
-#     frac = np.stack([frac_u, frac_v, frac_w], axis=-1)  # shape: (nx, ny, nz, 3)
-
-#     # Convert fractional to orthogonal using unit cell matrix
-#     uc_mat = np.array(g.unit_cell.orthogonalization_matrix)
-#     positions = frac @ uc_mat.T  # shape: (nx, ny, nz, 3)
-
-#     return positions
-
 def get_density_voxel_center_locations(density_map: gemmi.Ccp4Map):
     density_extent = density_map.get_extent()
     extent_minimum, extent_maximum = [np.array(list(density_extent.minimum)), np.array(list(density_extent.maximum))]
@@ -289,7 +260,7 @@ def wrap_density_around(atom_locations: np.ndarray, density_object: gemmi.Ccp4Ma
     density_object = expand_to_p1(density_object)
     while not atom_locations_bounds in get_density_bounds(density_object):
         density_object = expand(density_object)
-    density_centeroids = get_density_voxel_center_locations(density_object).reshape(list(density_object.grid.shape) + [3])
+    density_centeroids = get_density_voxel_center_locations(density_object)
     min_distances = calcualte_min_distance_between_cloud_points(density_centeroids, atom_locations)
     mask = min_distances < padding
 
@@ -299,10 +270,10 @@ def wrap_density_around(atom_locations: np.ndarray, density_object: gemmi.Ccp4Ma
     return sliced_density
 
 
-if __name__ == "__main__":
-    density = gemmi.read_ccp4_map("1lu4_box_xyz.ccp4")
-    pdb = gemmi.read_pdb("pipline_inputs/pdbs/1lu4/1lu4_chain_A_altloc_A_fixed.pdb")
-    atom_locations = np.array([list(atom.pos) for res in pdb[0][0] for atom in res])
-    wrapped_density = wrap_density_around(atom_locations, density)
-    wrapped_density.write_ccp4_map("wrapped_density.ccp4")
-    a = 2
+# if __name__ == "__main__":
+#     density = gemmi.read_ccp4_map("1lu4_box_xyz.ccp4")
+#     pdb = gemmi.read_pdb("pipline_inputs/pdbs/1lu4/1lu4_chain_A_altloc_A_fixed.pdb")
+#     atom_locations = np.array([list(atom.pos) for res in pdb[0][0] for atom in res])
+#     wrapped_density = wrap_density_around(atom_locations, density)
+#     wrapped_density.write_ccp4_map("wrapped_density.ccp4")
+#     a = 2

@@ -1,5 +1,3 @@
-from .density_omp import OMPMetric, DensityLogger, PDBManager
-from src.utils.io import AMINO_ACID_ATOMS_ORDER, get_sampler_pdb_inputs
 from Bio import PDB
 from Bio.PDB import PDBIO
 import os
@@ -7,6 +5,9 @@ import torch
 from Bio.PDB import PDBParser
 import numpy as np
 from Bio.PDB.PDBIO import Select
+
+from .density_omp import OMPMetric, DensityLogger, PDBManager
+from ..utils.io import AMINO_ACID_ATOMS_ORDER, get_sampler_pdb_inputs
 
 def log_fc_maps(sample_pdbs, reference_pdbs, ensemble_occupancies, pdb_occupancies, density_file, pdb_residue_range, samples_directory, selection_method, pdb_id, rmax, chain_id, raw_pdb_file, device=torch.device("cuda:0")):
     # Fc selected, fc gt, and fo

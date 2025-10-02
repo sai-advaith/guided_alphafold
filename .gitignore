@@ -194,3 +194,11 @@ pipeline_outputs*
 *.npy
 xray_outputs/*
 natbiotech_outputs_xray/*
+
+END_RAPID.com
+end.rapid/
+end.rapid.tar.gz
+
+density_subset_selector_temp_dir/*
+density_omp_temp_dir/*
+temp.*

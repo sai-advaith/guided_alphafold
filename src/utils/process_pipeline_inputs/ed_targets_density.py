@@ -29,23 +29,6 @@ def run_commands(commands: List[str]):
     bash_process.stdin.flush()
     return wait_for_output()
 
-def compute_volume(pdb_path):
-    """
-    Make sure input is in degrees
-    """
-    structure = gemmi.read_structure(pdb_path)
-    
-    # Extract unit cell
-    cell = structure.cell
-    a, b, c = cell.a, cell.b, cell.c
-    alpha, beta, gamma = cell.alpha, cell.beta, cell.gamma
-
-    # Volume calculation
-    init_volume = a * b * c
-    alpha, beta, gamma = np.radians(alpha), np.radians(beta), np.radians(gamma)
-    angle_scaling = np.sqrt(1 - np.cos(alpha)**2 - np.cos(beta)**2 - np.cos(gamma)**2 + 2 * np.cos(gamma) * np.cos(alpha) * np.cos(beta))
-    return init_volume * angle_scaling
-
 def make_full_unit_cell(file_path, output_path):
     density_object = gemmi.read_ccp4_map(file_path)
     density_object.setup(0)
@@ -65,13 +48,9 @@ def end_cleanup(pdb, chain, current_dir, density_dir):
             if file_name.endswith(extension):
                 os.remove(file_name)
 
-    # Remove map vacuum level
-    os.remove(os.path.join(current_dir, "map_vacuum_level.com"))
-
 def cleanup_2fofc(pdb, chain, current_dir, density_dir):
     shutil.copy(f"{pdb}_chain_{chain}_2fofc_carved.ccp4", density_dir)
 
-    # Remove box files
     # Remove extensions
     extensions_to_remove = [".ccp4", ".pdb"]
     for extension in extensions_to_remove:
@@ -100,7 +79,7 @@ def get_end_maps(carve_pdb_path, chain, ccp4_setup_sh, phenix_setup_sh, pdbs_lis
 
         # Run END Rapid
         print("GENERATING END MAP")
-        run_commands([f"source {ccp4_setup_sh}\n", f"source {phenix_setup_sh}\n", f"./END_RAPID.com {pdb}_refine_001.eff -norapid\n"])
+        run_commands([f"source {ccp4_setup_sh}\n", f"source {phenix_setup_sh}\n", f"./END_RAPID.com {pdb}_refine_001.eff cycles=1 -norapid\n"])
 
         # Make full unit cell
         print("CARVING END MAP")
