@@ -8,11 +8,11 @@ class AbstractLossFunction:
     def wandb_log(self, x_0_hat):
         pass
 
-    def __call__(self, x_0_hat, time):
+    def __call__(self, x_0_hat, time, structures=None, i=None):
         pass
     
     def post_optimization_step(self):
         pass
 
-    def save_state(self, structures, folder_path):
+    def save_state(self, structures, folder_path, **kwargs):
         pass

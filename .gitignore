@@ -203,3 +203,4 @@ end.rapid.tar.gz
 density_subset_selector_temp_dir/*
 density_omp_temp_dir/*
 temp.*
+*.pkl

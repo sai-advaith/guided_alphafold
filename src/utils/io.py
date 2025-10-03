@@ -288,7 +288,7 @@ def get_backbone_ca_mask(pdb_file, device=torch.device("cpu")):
 def query_msa_server(msa_save_dir, pdb_id, sequence):
     os.makedirs(msa_save_dir, exist_ok=True)
     if not os.path.exists(f"{msa_save_dir}/{pdb_id}"):
-        msa = run_mmseqs2([sequence], prefix='/tmp/', user_agent='bjing2016/alphaflow')[0]
+        msa = run_mmseqs2([sequence], prefix='/tmp/', user_agent='sai-advaith/guided_alphafold')[0]
         os.system('rm -r /tmp/_env')
 
         os.makedirs(f'{msa_save_dir}/{pdb_id}/msa/', exist_ok=True)

@@ -14,7 +14,7 @@ class MultiLossFunction(AbstractLossFunction):
             wandb_log.update(log)
         return wandb_log
     
-    def __call__(self, x_0_hat, time):
+    def __call__(self, x_0_hat, time, structures=None, i=None):
         # TODO: possibly make the x_0_hat go from one loss function to the other, might be usefull
         loss_function_values = [loss_function(x_0_hat, time) for loss_function in self.loss_functions]
         loss_sum = sum([loss_values[0] * weight for loss_values, weight in zip(loss_function_values, self.weights)])
