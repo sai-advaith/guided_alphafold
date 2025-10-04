@@ -35,7 +35,7 @@ def clip_norm(tensor, norm):
 
 class MSA:
     """
-        This is a basic class that contains the 3 tenors that represent the msa encoding
+        This is a basic class that contains the 3 tensors that represent MSA embeddings
     """
     def __init__(self, s_inputs: torch.Tensor, s: torch.Tensor, z: torch.Tensor):
         self.s_inputs = s_inputs
