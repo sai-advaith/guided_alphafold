@@ -1,0 +1,171 @@
+general:
+  name: "baseline"
+  output_folder: "pipeline_outputs/baseline"
+  batch_size: 1
+  apply_diffusion_guidance: true
+  seed: 98710
+
+  denoiser_time_index: -1 # the time index the optimization will be done with, the index the diffusion process will start from  
+  save_structures_every_n_steps: 201
+  recycle_structures: 
+    should_recycle: false
+    recycle_connection: [160,135] # false or [a,b] where it will recycle from step a to step b by adding the noise and restaring from iteration b [b < a]
+    recycle_n_times: 2
+
+# 
+protein:
+  sequences: 
+    - sequence: "PLVNIYNCSGVQVGDNNYLTMQQT"
+      count: 3
+  pdb_id: "7dac"
+  assembly_identifier: "amyloid_7DAC_short_mmseq2"
+  chains_to_use: [0, 1, 2] # which chains to use from the assembly/the pdb
+  residue_range: [[1,2], [1,2], [1,2]] 
+  reference_pdb: "pipeline_inputs/pdbs/7dac/pdb7da4_seqaligned_short.pdb" # this is passed to the model manager and used to save the pdb
+  reference_raw_pdb: pipeline_inputs/pdbs/7dac/pdb7da4_seqaligned_short.pdb # this is used to save the merged pdb
+  reference_raw_pdb_chain: A # this is used to save the merged pdb
+  contains_missing_atoms: true
+  should_fill_mask: true
+  should_align_to_chains: [0, 1, 2] # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+
+model_manager:
+  N_cycle: 10
+  chunk_size: 256
+  diffusion_N: 200
+  gamma0: 0.8
+  gamma_min: 1.0
+  noise_scale_lambda: 1.003
+  step_scale_eta: 1.0
+  msa_save_dir: "./alignment_dir"
+  msa_embedding_cache_dir: "./msa_cache"
+  model_checkpoint_path: "./src/af3-dev/release_model/model_v0.2.0.pt"
+  dump_dir: "proteniX_output"
+  use_msa: true
+  time_profiler: false
+  memory_profiler: false
+  pairformer_mixed_precision: true
+  reapply_noise_if_fixed_ROI: true
+
+wandb:
+  login_key: "7d48a2a99ede76f23c6fa625c03221699bf86b5f"
+  mode: "online" # options are "disabled" or "online"
+  project: "em_guided_alphafold"
+
+diffusion_process:
+  guidance:
+    step_size: 1 
+    guidance_direction_scale_factor: 0.2
+    normalize_gradients: true
+    guidance_scale_gradually_increase: false
+
+loss_function:
+  loss_function_type: ["cryoesp"]
+  violation_loss_weight: 0
+  bond_length_loss_weight: 0.0
+  normalize_losses_by_main_loss: true
+
+  cryoesp_loss_function:
+    evaluate_only_resolved: true # 7dac specific. False otherwise
+    reference_pdb: "pipeline_inputs/pdbs/7dac/pdb7dac_seqaligned_short.pdb"
+    esp_file: "pipeline_inputs/pdbs/7dac/emd_30622.map" # emd_41880 (e) emd_41877 (b)
+    is_assembled: true
+    emdb_resolution: 4.24
+    global_b_factor: 100.0
+    esp_gt_cutoff_value: #0.000651 # 0.0035 - around this magnitude trimming to get the lowest signal possible..!
+    reduced_D: 288
+    use_Coloumb: false
+    guide_only_ROI: false
+    aling_only_outside_ROI: false
+    log_bond_length_loss: true
+    rmax_for_mask: 2.1
+    rmax_for_esp: 10.0 # this should always be at least somewhat far, otherwise less accurate..!
+    rmax_for_final_bfac_fitting: 2.5
+    rmax_for_backbone: 2.5
+    optimize_bfactor: true 
+    reapply_b_factor: false
+    reapply_is_learnable: false
+    combinatorially_best_alignment: false # ["combinatorics", "cost_matrix_hungarian", "global_density", "density_to_chains_OT", false]
+    alignment_strategy: "global_density_gradient_ascent" # "global_density_gradient_ascent" # "global_density", "global_rmsd_to_gt", density_to_chains_OT, per_blob_centroid_alignment, global_density_gradient_ascent
+    reuse_multimer_alignment: false
+    reordering_every: 201
+
+    gradient_ascent_parameters:
+      steps: 30
+      lr_t_A: 500 # Times pixel_size
+      lr_r_deg: 1000
+      reduction: "mean"
+      per_step_t_cap_voxels: 3.0
+      Bfac: 200
+      bfactor_minimum: 200
+      n_random: 10000
+      t_init_box_edge_voxels: 10.0
+      momentum_factor: 0.9 # the way the stregnth of the anchor's 'previous' alignment fades away (in case momentum option is chosen for the global alignment strategy..!)
+
+    symmetry: 
+      symmetry_type: "per_blob_gradient_alignment" # "per_blob_gradient_alignment" # "debug_per_chain_alignment" #"per_blob_gradient_alignment" # "custom_amyloid", "per_blob_alignment", "global_axis_chainwise_flipping", "debug_per_chain_alignment", "per_blob_gradient_alignment", "per_blob_centroid_alignment", none, 
+      reapply_symmetry_every: [1,2,3,4,5,6,7,8,9,10,11,12,13,14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
+
+    sinkhorn: 
+      percentage: 1.0
+      p: 2  
+      blur: 0.005
+      backend: "online" 
+      reach: 
+      scaling: 0.95
+      turn_off_after: 130 # after this iteration, rely only on the density loss since the structures are already well aligned..!
+      debug_with_rmsd: false
+      debias: false
+      guide_multimer_by_chains: true
+      threshold_to_find_chains: 0.1
+
+    dihedrals:
+      use_dihedrals: false # [false, "from_gt", "from_nmr"] set to from_nmr if you want to use it
+      dihedral_loss_weight: 0.0
+      dihedrals_file: "pipeline_inputs/dihedrals/7dac/7dac_NOE.tab" # don't have it now, so None
+
+  nmr_loss_function:
+    weight: 0.0
+    reference_nmr: "em_pipeline_inputs/nmr_restraints/7dac/7dac_or_code.csv"
+    pdb_file: "em_pipeline_inputs/pdbs/7dac/7dac_short_seqaligned.pdb"
+    methyl_rdc_file: "" #"pipeline_inputs/nmr_s_2/6f3k_methyl_s2.csv" #"pipeline_inputs/nmr_s_2/6f3k_methyl_s2.csv" # "pipeline_inputs/nmr_s_2/ubi_methyl_rdc.csv" # nmr_s_2/ubi_nh_rdc.csv  nmr_s_2/ubi_methyl_s2.csv  nmr_s_2/ubi_solution_S2.csv
+    methyl_rdc_scale: 0.0
+    amide_rdc_file:  "" #"pipeline_inputs/nmr_s_2/6f3k_nh_s2.csv" #"nmr_s_2/ubi_nh_rdc.csv" 
+    amide_rdc_scale: 0.0
+    amide_relax_file: "" #"pipeline_inputs/nmr_s_2/ubi_solution_S2.csv" 
+    amide_relax_scale: 0.0
+    methyl_relax_scale: 0.0
+    methyl_relax_file: "" #nmr_s_2/ubi_methyl_relaxation.csv
+    noe_scale: 1.0
+    iid_loss: false
+
+  rmsd_loss_function:
+    reference_files: ["nmr_pdbs/1d3z.pdb"]
+    top_k: 30 # when calculating the loss, taking the distances for the top_k atoms and calculating only on them
+    mean_loss_weight: 4 # the weight for the loss that compares the atom locations mean across the batch with the mean of the references
+    distance_loss_weight: 1 # the weight for the loss that compares the distances of the closest confirmation to each target
+
+  density_loss_function:
+    density_file: "pipeline_inputs/densities/1lu4/1lu4_box_xyz.ccp4"
+    mtz_file: "pipeline_inputs/mtzs/1lu4/1lu4.mtz"
+    rmax: 5.0
+    ccp4_env_path: "/nfs/scistore20/bronsgrp/amaddipa/ccp4-8.0/bin/ccp4.setup-sh"
+    phenix_env_path: "/nfs/scistore20/bronsgrp/amaddipa/phenix-1.21.2-5419/phenix_env.sh"
+    map_type: "end"
+    occ_lambda: 0.7
+    reference_pdbs: ["pipline_inputs/pdbs/1lu4/1lu4_chain_A_altloc_A_fixed.pdb", "pipline_inputs/pdbs/1lu4/1lu4_chain_A_altloc_B_fixed.pdb"] # these pdbs are used to extract the region of intreset in the density map, and align the structures to the density
+
+  pairwise_loss_function:
+    reference_pdb: "nmr_pdbs/1d3z/1d3z_fixed.pdb"
+    rmax: 5
+    atom_type: "N"
+
+  noe_loss_function:
+    reference_nmr: "nmr_restraints/1d3z_or_code.csv"
+    loss_type: "bounds" # "bounds" or "distance"
+    hydrogen_guidance: true
+    pdb_file: "nmr_pdbs/1d3z/1d3z_fixed.pdb"
+    average_intensity: false
+    s_2_file: "nmr_s_2/ubi_solution_S2.csv"
+    compute_s_2: true
+  

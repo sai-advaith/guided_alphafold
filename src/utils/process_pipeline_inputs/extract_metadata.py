@@ -108,4 +108,3 @@ def main(pdb_id, chain, region=None, root="pipeline_inputs"):
 
     # Save
     save_metadata(pdb_id, idx_range, seq, root, pdb_range, chain)
-    return idx_range[0], pdb_range[0]

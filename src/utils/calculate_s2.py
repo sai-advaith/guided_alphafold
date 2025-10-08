@@ -132,8 +132,8 @@ class CalculateS2:
             # Gather the N->H vectors from each superimposed structure
             residue_vectors = self.gather_nh_vectors(structures, atom_array)
         
-        if "ubi" in path:
-            residue_vectors = {k:v for k,v in residue_vectors.items() if int(k.split(",")[0]) <= 70}
+        # trimming off edges for 1d3z as it introduces a lot of noise
+        residue_vectors = {k:v for k,v in residue_vectors.items() if int(k.split(",")[0]) <= 70}
             
         # Compute the ensemble-derived S^2
         order_params = self.compute_order_parameters(residue_vectors)
@@ -148,21 +148,6 @@ class CalculateS2:
         gt = gt[gt['s2'].apply(is_valid_float)]
         gt["s2"] = gt["s2"].astype(float).values
         return gt
-
-    
-    def compute_salmon(self, predicted_order_parameters):
-        salmon = pd.read_csv("src/metrics/s2/Salmon.txt", header=None, delimiter=" ")
-        salmon_res_id = salmon.iloc[:, 0].astype(str)
-        salmon_s2 = salmon.iloc[:, 1]
-        salmon_dict = dict(zip(salmon_res_id, salmon_s2))
-        salmon_dict = {k: v for k, v in salmon_dict.items() if int(k) <= 70}
-        salmon_diff = [salmon_dict[res_id] - predicted_order_parameters[res_id] for res_id in predicted_order_parameters.keys() if res_id in salmon_dict]
-        filtered_salmon_order_params = [predicted_order_parameters[res_id] for res_id in predicted_order_parameters.keys() if res_id in salmon_dict]
-        salmon_order_params_list = [salmon_dict[res_id] for res_id in predicted_order_parameters.keys() if res_id in salmon_dict]
-        salmon_corr = np.corrcoef(np.array(salmon_order_params_list), np.array(filtered_salmon_order_params))[0, 1]
-        salmon_error = np.nanmean((np.array(salmon_diff))**2)
-        
-        return salmon_corr, salmon_error, salmon_dict
     
     def compute_s2_correlation(self, predicted_order_parameters,s2_type,path):
         gt = self.get_gt_s2(path)
@@ -185,11 +170,8 @@ class CalculateS2:
             data_error = gt[gt["res_id"].astype(str).isin(gt_dict.keys())]["s2_error"].tolist()
         if s2_type == "methyl_rdc":
             data_error = gt["mod_error"].astype(float).tolist()
-        if s2_type == "amide_relax":
-            salmon_corr, salmon_error, salmon_dict = self.compute_salmon(predicted_order_parameters)
-            return corr,salmon_corr,error, salmon_error, gt_dict, salmon_dict, data_error, gt_res_id
         
-        return corr,np.nan,error, np.nan, gt_dict, np.nan, data_error, gt_res_id
+        return corr, error, gt_dict, data_error, gt_res_id
     
     
     
@@ -197,42 +179,7 @@ class CalculateS2:
         s2_results = {t: None for t in s2_types_dict.keys()}
         for s2_type in s2_types_dict.keys():
             s2_order_params, residue_vectors = self.calculate_s2_loss(structures, atom_arrays, s2_type, s2_types_dict[s2_type])
-            s2_corr,s2_salmon_corr,s2_error, s2_salmon_error, gt_dict, salmon_dict, data_error, gt_res_id = self.compute_s2_correlation(s2_order_params, s2_type, s2_types_dict[s2_type])
-            s2_results[s2_type] = {"order_params": s2_order_params, "residue_vectors": residue_vectors, "corr": s2_corr, "salmon_corr": s2_salmon_corr, "error":s2_error, "salmon_error":s2_salmon_error, "gt": gt_dict, "salmon": salmon_dict, "data_error":data_error, "gt_res_id":gt_res_id}
-            if s2_type == "amide_relax":
-                self.save_s2_graphs("test2", s2_order_params, s2_corr, s2_type, s2_types_dict[s2_type])
+            s2_corr,s2_error, gt_dict, data_error, gt_res_id = self.compute_s2_correlation(s2_order_params, s2_type, s2_types_dict[s2_type])
+            s2_results[s2_type] = {"order_params": s2_order_params}
         return {"ensemble_s2_results": json.dumps(s2_results)}
         
-     
-     
-    def save_s2_graphs(self, name, pred_order_params, s2_corr, s2_type, path):
-        gt = self.get_gt_s2(path)
-        if "methyl" in s2_type:
-            gt_res_id = [f"{res_id},{a1},{a2}" for res_id,a1,a2 in zip(gt["res_id"].values, gt["atom1"].values, gt["atom2"].values)]
-        else:
-            gt_res_id = [str(r) for r in gt["res_id"].values]
-        gt_s2 = np.array(gt["s2"])
-        # Plot the predicted and estimated s2
-        fig, ax = plt.subplots(1, 1, figsize=(15, 5))
-        keys = pred_order_params.keys()
-        pred_order_params = [v for k,v in zip(keys,list(pred_order_params.values())) if k in gt_res_id]
-        keys = [k for k in keys if k in gt_res_id]
-        original_keys = keys.copy()
-        keys = [k.replace(",", "\n") for k in keys]
-        ax.plot(keys, pred_order_params, label="predicted", marker="o")
-        guid_s2_values = [v for k,v in zip(gt_res_id, gt_s2) if k in original_keys]
-        ax.scatter(keys, guid_s2_values, label="estimated", marker="x", color="red")
-        ax.legend()
-        ax.grid(True, which='both', axis='both', linestyle='--', linewidth=0.5)
-        ax.set_xlabel("Residue ID")
-        ax.set_ylabel("S2")
-        # ax.set_xlim(0, 75)
-        ax.set_ylim(0, 1)
-        ax.set_title("S2 values. Error: {:.2f}".format(s2_corr.item()))
-        plt.tight_layout()
-        # Log the image to wandb
-        path = ""#"nature_sweep/s2_figures"
-        # os.makedirs(path, exist_ok=True)
-        # plt.savefig(f"{path}/{name}.png")
-        plt.savefig(f"{name}.png")
-        plt.close(fig)

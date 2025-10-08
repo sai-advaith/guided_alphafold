@@ -351,8 +351,8 @@ def split_pdb_by_altloc(raw_pdb_path, chain, pdb_residue_range, one_indexed_resi
     return samples, raw_occupancies
 
 def get_refined_cosine_and_maps(refined_pdb_path, config, selection_method, relaxed_dir):
-    pdb_residue_range = config.protein.pdb_residue_range
-    one_index_residue_range = config.protein.residue_range
+    pdb_residue_range = config.protein.pdb_residue_range[0]
+    one_index_residue_range = config.protein.residue_range[0]
     raw_pdb_path = config.protein.reference_raw_pdb
     chain_id = config.protein.reference_raw_pdb_chain
 

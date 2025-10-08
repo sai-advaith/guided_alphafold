@@ -47,12 +47,13 @@ class DensityMetricsProcessor:
         pdb_occupancy: List[float]
     ) -> Dict:
         """Create a standardized metrics dictionary."""
+        sequence = self.config.protein.sequences[0]["sequence"]
         return {
             "pdb": self.config.protein.pdb_id,
-            "residue range start": self.config.protein.residue_range[0],
-            "residue range end": self.config.protein.residue_range[1],
-            "pdb residue range start": self.config.protein.pdb_residue_range[0],
-            "pdb residue range end": self.config.protein.pdb_residue_range[1],
+            "residue range start": self.config.protein.residue_range[0][0],
+            "residue range end": self.config.protein.residue_range[0][1],
+            "pdb residue range start": self.config.protein.pdb_residue_range[0][0],
+            "pdb residue range end": self.config.protein.pdb_residue_range[0][1],
             "chain": self.config.protein.reference_raw_pdb_chain,
             "file names": file_names,
             "selected ensemble size": len(file_names),
@@ -68,12 +69,12 @@ class DensityMetricsProcessor:
             "pdb rscc means": [np.mean(rscc_arr) for rscc_arr in pdb_rscc],
             "ensemble occupancy": ensemble_occupancy,
             "pdb occupancy": pdb_occupancy,
-            "subseq": self.config.protein.sequence[self.config.protein.residue_range[0]-1:self.config.protein.residue_range[1]]
+            "subseq": sequence[self.config.protein.residue_range[0][0]-1:self.config.protein.residue_range[0][1]]
         }
 
     def _save_metrics(self, metrics: Dict, method: str):
         """Save metrics to a JSON file."""
-        filename = f"{self.config.protein.pdb_id}{self.config.protein.reference_raw_pdb_chain}_{self.config.protein.pdb_residue_range[0]}_{self.config.protein.pdb_residue_range[1]}_{method}_{self.map_type}_guided_metrics.json"
+        filename = f"{self.config.protein.pdb_id}{self.config.protein.reference_raw_pdb_chain}_{self.config.protein.pdb_residue_range[0][0]}_{self.config.protein.pdb_residue_range[0][1]}_{method}_{self.map_type}_guided_metrics.json"
         output_path = os.path.join(self.relaxed_dir, method, filename)
         with open(output_path, "w") as file:
             json.dump(metrics, file, indent=4)
@@ -94,7 +95,7 @@ class DensityMetricsProcessor:
             samples_directory=self.relaxed_dir,
             rmax=self.rmax,
             reference_density_file=self.config.loss_function.density_loss_function.density_file,
-            residue_range=self.config.protein.residue_range,
+            residue_range=self.config.protein.residue_range[0],
             altloc_a_path=self.config.loss_function.density_loss_function.reference_pdbs[0],
             altloc_b_path=self.config.loss_function.density_loss_function.reference_pdbs[1] 
                 if len(self.config.loss_function.density_loss_function.reference_pdbs) > 1 else None,
@@ -105,7 +106,7 @@ class DensityMetricsProcessor:
             mtz_file_path=self.config.loss_function.density_loss_function.mtz_file,
             reference_pdb_file_path=self.config.loss_function.density_loss_function.reference_pdbs[0],
             pdb_id=self.config.protein.pdb_id,
-            pdb_residue_range=self.config.protein.pdb_residue_range,
+            pdb_residue_range=self.config.protein.pdb_residue_range[0],
             ccp4_setup_sh=self.ccp4_setup_sh,
             phenix_setup_sh=self.phenix_setup_sh,
             map_type=self.map_type
@@ -151,13 +152,13 @@ class DensityMetricsProcessor:
             chain_id=self.config.protein.reference_raw_pdb_chain,
             pdb_folder=os.path.dirname(os.path.join(self.relaxed_dir, "occupancy_optim")),
             density_file=self.config.loss_function.density_loss_function.density_file,
-            residue_range=self.config.protein.residue_range,
+            residue_range=self.config.protein.residue_range[0],
             pdb_id=self.config.protein.pdb_id,
             device=self.device,
             regularization_weight=self.config.loss_function.density_loss_function.occ_lambda,
             rmax=self.rmax,
             mtz_file=self.config.loss_function.density_loss_function.mtz_file,
-            pdb_residue_range=self.config.protein.pdb_residue_range,
+            pdb_residue_range=self.config.protein.pdb_residue_range[0],
             phenix_setup_sh=self.phenix_setup_sh,
             ccp4_setup_sh=self.ccp4_setup_sh
         )

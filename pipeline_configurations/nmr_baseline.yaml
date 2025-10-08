@@ -1,0 +1,134 @@
+general:
+  name: "nmr_baseline"
+  output_folder: "nmr_pipeline_outputs/nmr_baseline"
+  batch_size: 16
+  apply_diffusion_guidance: true
+  seed: 0
+  denoiser_time_index: -1 # the time index the optimization will be done with, the index the diffusion process will start from
+  save_structures_every_n_steps: 201
+  recycle_structures: 
+    should_recycle: false
+    recycle_connection: null # false or [a,b] where it will recycle from step a to step b by adding the noise and restaring from iteration b [b < a]
+    recycle_n_times: -1
+ 
+protein:
+  sequences: 
+    - sequence: "GYIPEAPRDGQAYVRKDGEWVLLSTFL"
+      count: 1 # this way, we can be especifying our sequences and the corresponding things etc. We ween an assembly specifier too..!
+  pdb_id: "1u0p"
+  assembly_identifier: "1u0p_mono" # assembly identifier to find the cached dictionary, msa embeddingss, etc.
+  chains_to_use: [0] # which chains to use from the assembly/the pdb
+  residue_range: [ [0,1] ] # (list for each individual chain) 
+  reference_pdb: "nmr_pipeline_inputs/pdbs/1u0p/1u0p_fixed.pdb" # this is passed to the model manager and used to save the pdb
+  reference_raw_pdb: "nmr_pipeline_inputs/pdbs/1u0p/1u0p_fixed.pdb" # this is used to save the merged pdb
+  reference_raw_pdb_chain: A # this is used to save the merged pdb
+  contains_missing_atoms: true
+  should_fill_mask: false 
+  should_align_to_chains: [0]
+
+model_manager:
+  N_cycle: 10
+  chunk_size: 256
+  diffusion_N: 200
+  gamma0: 0.8
+  gamma_min: 1.0
+  noise_scale_lambda: 1.003
+  step_scale_eta: 1.0
+  msa_save_dir: "./alignment_dir"
+  msa_embedding_cache_dir: "./msa_cache"
+  model_checkpoint_path: "./src/af3-dev/release_model/model_v0.2.0.pt"
+  dump_dir: "proteniX_output"
+  use_msa: true
+  time_profiler: false
+  memory_profiler: false
+  pairformer_mixed_precision: true # if pairformer doesn't fit in the memory, used mixed precision (the only hope in such case if too many tokens..)
+  reapply_noise_if_fixed_ROI: true # if we fixed the ROI, we reapply the noise to make sure the x_0_hat etc. lies on the manifold..!
+
+wandb:
+  login_key: "7d48a2a99ede76f23c6fa625c03221699bf86b5f"
+  mode: "online" # options are "disabled" or "online"
+  project: "nmr_guided_alphafold"
+
+loss_function:
+  loss_function_type: ["nmr"] # "rmsd", "density", "noe", "sf", "cryoesp",
+  violation_loss_weight: 1.0
+  bond_length_loss_weight: 0.0
+  normalize_losses_by_main_loss: false
+
+  rmsd_loss_function:
+    reference_files: ["nmr_pipeline_inputs/pdbs/6f3k.pdb"]
+    top_k: 30 # when calculating the loss, taking the distances for the top_k atoms and calculating only on them
+    mean_loss_weight: 1 # the weight for the loss that compares the atom locations mean across the batch with the mean of the references
+    distance_loss_weight: 0 # the weight for the loss that compares the distances of the closest confirmation to each target
+
+  density_loss_function:
+    density_file: "pipline_inputs/densities/4ole/4ole_box_xyz.ccp4"
+    mtz_file: "pipline_inputs/mtzs/4ole/4ole.mtz" # for rfactor calculation
+    rmax: 5
+    reference_pdbs: ["pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_A_fixed.pdb", "pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_B_fixed.pdb"] # these pdbs are used to extract the region of intreset in the density map, and align the structures to the density
+  
+  sf_density_loss_function:
+    mtz_file: "pipline_inputs/mtzs/4ole/4ole.mtz"
+    density_file: null
+    reference_pdbs: ["pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_A_fixed.pdb", "pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_B_fixed.pdb"] # these pdbs are used to extract the region of intreset in the density map, and align the structures to the density
+    mtz_file: "pipline_inputs/mtzs/4ole/4ole.mtz"
+    rmax: 5
+    compare_zone_of_interest_only: true
+    compare_sfs: false
+    altloc_region_b_factor: 25
+    loss_threshold: 0.2
+    parameter_lr: 0.1
+    optimize_unisotropic: true
+    n_bins: 20
+
+  nmr_loss_function:
+    weight: 1.0
+    reference_nmr: "nmr_pipeline_inputs/restraints/1u0p/1u0p_or_code.csv"
+    pdb_file: "nmr_pipeline_inputs/pdbs/1u0p/1u0p_fixed.pdb"
+    methyl_rdc_file: "" #"pipeline_inputs/nmr_s_2/ubi_methyl_rdc.csv" #"pipeline_inputs/nmr_s_2/6f3k_methyl_s2.csv" #"pipeline_inputs/nmr_s_2/6f3k_methyl_s2.csv" # "pipeline_inputs/nmr_s_2/ubi_methyl_rdc.csv" # nmr_s_2/ubi_nh_rdc.csv  nmr_s_2/ubi_methyl_s2.csv  nmr_s_2/ubi_solution_S2.csv
+    methyl_rdc_scale: 0.0
+    amide_rdc_file:  "" #"pipeline_inputs/nmr_s_2/6f3k_nh_s2.csv" #"nmr_s_2/ubi_nh_rdc.csv" 
+    amide_rdc_scale: 0.0
+    amide_relax_file: "" #"pipeline_inputs/nmr_s_2/ubi_solution_S2.csv" 
+    amide_relax_scale: 0.0
+    methyl_relax_scale: 0.0
+    methyl_relax_file: "" #"pipeline_inputs/nmr_s_2/ubi_methyl_relaxation.csv" #nmr_s_2/ubi_methyl_relaxation.csv
+    noe_scale: 1.0
+    iid_loss: false
+
+
+  cryoesp_loss_function:
+    reference_pdb: "pipeline_inputs/pdbs/6f3k/6F3K-assembly1.cif" 
+    esp_file: "pipeline_inputs/pdbs/6f3k/emd_4179.map" # emd_41880 (e) emd_41877 (b)
+    is_assembled: true
+    emdb_resolution: 4.2
+    global_b_factor: 230.0
+    esp_gt_cutoff_value:  # Or leave empty if want no thresholding! 0.0035 - around this magnitude trimming to get the lowest signal possible..!
+    reduced_D: 200
+    use_Coloumb: true
+    guide_only_ROI: false
+    aling_only_outside_ROI: true
+    percentage_of_rmsd_loss: 0.0
+    log_bond_length_loss: true
+    rmax: 5.0
+    optimize_bfactor: true
+    reapply_b_factor: 300.0 # a float or a False
+    reapply_is_learnable: false
+
+  sf_loss_function:
+    reference_mtz: "pipeline_inputs/mtzs/1u0p/1u0p.mtz"
+    rmsd_alignment: true # if this is true, at each iteration RMSD will be done with respect to the reference structure
+    optimize_alignment: false # if rmsd_alignment is false, this will indicate if to optimize the rotations and translations or not
+    guide_residue_range: true # if this is true, the guidance will be only on the atom in the residue range, if this is false, we will optimize the entire protein
+    isotropic_parameters_lr: 0.01
+
+diffusion_process:
+  guidance:
+    step_size: 1.0
+    guidance_direction_scale_factor: 0.3 # this will scale the guidance direction only and not the extra optimized parameters (like bfactor)
+    normalize_gradients: true # whether to normalize the gradients or not
+    guidance_scale_gradually_increase: false
+
+
+
+

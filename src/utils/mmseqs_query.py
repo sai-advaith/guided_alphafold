@@ -124,7 +124,7 @@ def run_mmseqs2(x, prefix, use_env=True, use_filter=True,
 
     # define path
     path = f"{prefix}_{mode}"
-    if not os.path.isdir(path): os.mkdir(path)
+    if not os.path.isdir(path): os.makedirs(path, exist_ok=True)
 
     # call mmseqs2 api
     tar_gz_file = f'{path}/out.tar.gz'

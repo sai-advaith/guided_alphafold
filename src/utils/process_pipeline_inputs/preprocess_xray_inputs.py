@@ -59,19 +59,20 @@ def create_density_configuration_file_from_baseline(pdb_id, chain, input_directo
 
     with open(reference_baseline, "r") as f:
         config = yaml.safe_load(f)
-    os.makedirs(f"{input_directory}/metadata/{pdb_id}", exist_ok=True)
 
     with open(f"{input_directory}/metadata/{pdb_id}/{pdb_id}.json", "r") as f:
         metadata = json.load(f)
 
     # Residue range
-    residue_range = metadata["residue_region"][0]
-    pdb_residue_range = metadata["pdb_residue_range"][0]
-    config["general"]["name"] = f"{pdb_id}{chain}_{pdb_residue_range[0]}_{pdb_residue_range[1]}_{map_type}_guided"
+    residue_range = metadata["residue_region"]
+    pdb_residue_range = metadata["pdb_residue_range"]
+    config["general"]["name"] = f"{pdb_id}{chain}_{pdb_residue_range[0][0]}_{pdb_residue_range[0][1]}_{map_type}_guided"
     config["general"]["output_folder"] = f"{output_directory}/{map_type}"
 
-    # Protein parameters
-    config["protein"]["sequence"] = metadata["seq"]
+    # Protein parameters (only monomers supported for now)
+    config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"]}]
+    config["protein"]["chains_to_use"] = [0]
+    config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = pdb_id
     config["protein"]["residue_range"] = residue_range
     config["protein"]["pdb_residue_range"] = pdb_residue_range
@@ -106,12 +107,10 @@ def create_density_configuration_file_from_baseline(pdb_id, chain, input_directo
     guided_config = deepcopy(config)
     guided_config["general"]["apply_diffusion_guidance"] = True
     guided_name = guided_config['general']['name']
-    guided_config["general"]["name"] = guided_name
-
     guided_config_file_path = os.path.join(configurations_folder, f"{guided_name}.yaml")
     with open(guided_config_file_path, "w") as f:
         yaml.safe_dump(guided_config, f)
-    
+
     return guided_config_file_path
 
 def main(pdb_id, chain, region, input_directory, output_directory, ccp4_setup_sh, phenix_setup_sh, wandb_key, wandb_project, map_type="end"):

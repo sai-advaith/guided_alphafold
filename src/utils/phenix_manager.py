@@ -205,3 +205,7 @@ class PhenixManager:
     def phenix_map_box(self, carve_pdb_path, map_path, wrapping=True, selection_radius=10, symmetry="P1"):
         shell_command = f"phenix.map_box {carve_pdb_path} {map_path} wrapping={wrapping} selection_radius={selection_radius} symmetry={symmetry}"
         return self.run_shell_command(shell_command)
+
+    def phenix_map_model_cc(self, pdb_path, map_path, resolution, output_file_name_prefix):
+        shell_command = f"phenix.map_model_cc {pdb_path} {map_path} resolution={resolution} scattering_table=n_gaussian per_residue=True output.file_name_prefix={output_file_name_prefix}"
+        return self.run_shell_command(shell_command)

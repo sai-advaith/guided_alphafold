@@ -26,6 +26,13 @@ dependencies:
   - scikit-learn-extra==0.3.0
   - pdbfixer==1.9.0
   - openmm==8.0
+  - skan==0.13.0
+  - scikit-image==0.24.0
+  - imageio==2.37.0
+  - geomloss==0.2.6
+  - pynmrstar==3.3.5
+  - hydride==1.2.3
+  - loco-hd==0.1.4
 
   # Torch
   - pytorch==2.3.1
@@ -46,7 +53,7 @@ dependencies:
       - pykeops==2.3
       - json==2.0.9
 
-      # AlphaFold3 support
+      # AlphaFold2 support
       - absl-py==1.0.0
       - dm-haiku==0.0.12
       - docker==5.0.0

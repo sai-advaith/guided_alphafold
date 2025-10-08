@@ -105,7 +105,6 @@ def fix_met_to_mse_based_on_reference(reference_pdb, target_pdb):
   target_structure = gemmi.read_pdb(target_pdb)
   target_chain = target_structure[0][0]
   for source_residue, target_residue in zip(reference_chain, target_chain):
-    # TODO: Other mutations?
     if source_residue.name == "MSE":
         target_residue.name = "MSE"
         for atom in target_residue:

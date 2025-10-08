@@ -13,7 +13,7 @@ class ViolationLossFunction(AbstractLossFunction):
         violation_loss = violations_dict["between_residues"]["clashes_mean_loss"] + violations_dict["between_residues"]["connections_per_residue_loss_sum"].mean() + violations_dict["within_residues"]["per_atom_loss_sum"].mean()
         return violation_loss
     
-    def __call__(self, x_0_hat, time):
+    def __call__(self, x_0_hat, time, structures=None, i=None, step=None):
         loss = self.get_violations_loss(x_0_hat)
         self._last_loss = loss.item()
         return loss, None

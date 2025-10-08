@@ -1,18 +1,30 @@
 general:
   name: "baseline"
-  output_folder: "pipeline_outputs/baseline"
+  output_folder: "pipeline_outputs/xray_baseline"
   batch_size: 16
   apply_diffusion_guidance: true
   seed: 0
+  denoiser_time_index: 0
+  save_structures_every_n_steps: -1
+  recycle_structures: 
+    should_recycle: false
+    recycle_connection: null # false or [a,b] where it will recycle from step a to step b by adding the noise and restaring from iteration b [b < a]
+    recycle_n_times: -1
 
 protein:
-  sequence: "QATSQPINFQVQKDGSSEKSHMDDYMQHPGKVIKQNNKYYFQTVLNNASFWKEYKFYNANNQELATTVVNDNKKADTRTINVAVEPGYKSLTTKVHIVVPQINYNHRYTTHLEFEKAIPTLA"
+  assembly_identifier: null
+  sequences:
+    - count: 1
+      sequence: "QATSQPINFQVQKDGSSEKSHMDDYMQHPGKVIKQNNKYYFQTVLNNASFWKEYKFYNANNQELATTVVNDNKKADTRTINVAVEPGYKSLTTKVHIVVPQINYNHRYTTHLEFEKAIPTLA"
   pdb_id: "2o1a"
-  residue_range: [34, 37]
+  chains_to_use: [0]
+  residue_range: [[34, 37]]
   reference_pdb: "pipline_inputs/pdbs/2o1a/2o1a_chain_A_altloc_A_fixed.pdb" # this is passed to the model manager and used to save the pdb
   reference_raw_pdb: pipline_inputs/pdbs/2o1a/2o1a.pdb # this is used to save the merged pdb
   reference_raw_pdb_chain: A # this is used to save the merged pdb
-
+  contains_missing_atoms: false
+  should_fill_mask: false
+  should_align_to_chains: [0]
 
 model_manager:
   N_cycle: 10
@@ -25,8 +37,12 @@ model_manager:
   msa_save_dir: "./alignment_dir"
   msa_embedding_cache_dir: "./msa_cache"
   model_checkpoint_path: "./src/af3-dev/release_model/model_v0.2.0.pt"
-  dump_dir: "proteinX_output"
+  dump_dir: "proteniX_output"
   use_msa: true
+  time_profiler: false
+  memory_profiler: false
+  pairformer_mixed_precision: false
+  reapply_noise_if_fixed_ROI: false
 
 wandb:
   login_key: wandb_login_key
@@ -34,9 +50,11 @@ wandb:
   project: wandb_project_name
 
 loss_function:
-  loss_function_type: "density" # "rmsd", "density", "pairwise", "heavy_noe", "hydrogen_noe", "sf", "sf_density", "epr"
+  loss_function_type: ["density"] # "density", "pairwise", "heavy_noe", "nmr", "sf_density"
   violation_loss_weight: 0.0
   bond_length_loss_weight: 0.0
+  normalize_losses_by_main_loss: false
+  start_guidance_from: 0
 
   rmsd_loss_function:
     reference_files: ["nmr_pdbs/6f3k.pdb"]
@@ -54,44 +72,26 @@ loss_function:
     map_type: "end"
     occ_lambda: 0.7
     reference_pdbs: ["pipline_inputs/pdbs/2o1a/2o1a_chain_A_altloc_A_fixed.pdb", "pipline_inputs/pdbs/2o1a/2o1a_chain_A_altloc_B_fixed.pdb"] # these pdbs are used to extract the region of intreset in the density map, and align the structures to the density
+    weight: 1
   
-  sf_density_loss_function:
-    mtz_file: "pipline_inputs/mtzs/4ole/4ole.mtz"
-    density_file: null
-    reference_pdbs: ["pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_A_fixed.pdb", "pipline_inputs/pdbs/4ole/4ole_chain_B_altloc_B_fixed.pdb"] # these pdbs are used to extract the region of intreset in the density map, and align the structures to the density
-    mtz_file: "pipline_inputs/mtzs/4ole/4ole.mtz"
-    rmax: 5
-    compare_zone_of_interest_only: true
-    compare_sfs: false
-    altloc_region_b_factor: 25
-    loss_threshold: 0.2
-    parameter_lr: 0.1
-    optimize_unisotropic: true
-    n_bins: 20
-
   pairwise_loss_function:
     reference_pdb: "nmr_pdbs/6f3k/6f3k_fixed.pdb"
     rmax: 5
     atom_type: "N"
 
-  epr_loss_function:
-    constraints_file: "pipeline_inputs/epr/pre_distances.csv"
-    rotamers_statistics_file: "pipeline_inputs/epr/rotamer1_R1A_298K_2015.csv"
-    rotamers_structures_folder: "pipeline_inputs/epr/rotamer1_R1A_298K_2015"
-
-  hydrogen_noe_loss_function:
-    reference_nmr: "pipeline_inputs/nmr_restraints/6f3k_or_code.csv"
-    pdb_file: "pipeline_inputs/nmr_pdbs/6f3k/6f3k_fixed.pdb"
-    methyl_rdc_file: "" #"pipeline_inputs/nmr_s_2/6f3k_methyl_s2.csv" # "pipeline_inputs/nmr_s_2/ubi_methyl_rdc.csv" # nmr_s_2/ubi_nh_rdc.csv  nmr_s_2/ubi_methyl_s2.csv  nmr_s_2/ubi_solution_S2.csv
+  nmr_loss_function:
+    weight: 1.0
+    reference_nmr: "pipeline_inputs/nmr_restraints/1u0p_or_code.csv"
+    pdb_file: "pipeline_inputs/nmr_pdbs/1u0p/1u0p_fixed.pdb"
+    methyl_rdc_file: ""
     methyl_rdc_scale: 0.0
-    amide_rdc_file: "" #"nmr_s_2/ubi_nh_rdc.csv" 
-    amide_rdc_scale: 0.0 
-    amide_relax_file: "" #"pipeline_inputs/nmr_s_2/ubi_solution_S2.csv" 
+    amide_rdc_file:  ""
+    amide_rdc_scale: 0.0
+    amide_relax_file: ""
     amide_relax_scale: 0.0
     methyl_relax_scale: 0.0
-    methyl_relax_file: "" #nmr_s_2/ubi_methyl_relaxation.csv
+    methyl_relax_file: ""
     noe_scale: 1.0
-    op_n_bootstrap: 0
     iid_loss: false
 
   heavy_noe_loss_function:
@@ -99,17 +99,66 @@ loss_function:
     pdb_file: "pipeline_inputs/nmr_pdbs/6f3k/6f3k_fixed.pdb"
     iid_loss: false
 
+  cryoesp_loss_function:
+    reference_pdb: "pipeline_inputs/pdbs/6w0o/pdb6w0o_seqaligned_1res.pdb"
+    esp_file: "pipeline_inputs/pdbs/6w0o/emd_21501.map" # emd_41880 (e) emd_41877 (b)
+    is_assembled: true
+    emdb_resolution: 2.77
+    global_b_factor: 100.0
+    reduced_D: 300
+    use_Coloumb: false
+    guide_only_ROI: false
+    aling_only_outside_ROI: false
+    log_bond_length_loss: false
+    rmax_for_mask: 2.1
+    rmax_for_esp: 10.0
+    rmax_for_final_bfac_fitting: 2.1
+    optimize_bfactor: true
+    reapply_b_factor: false
+    reapply_is_learnable: false
+    combinatorially_best_alignment: false
+    alignment_strategy: "global_density_gradient_ascent"
+    reuse_multimer_alignment: false
+    reordering_every: 201
 
-  sf_loss_function:
-    reference_mtz: "pipeline_inputs/mtzs/1d3z/1d3z.mtz"
-    rmsd_alignment: true # if this is true, at each iteration RMSD will be done with respect to the reference structure
-    optimize_alignment: false # if rmsd_alignment is false, this will indicate if to optimize the rotations and translations or not
-    guide_residue_range: true # if this is true, the guidance will be only on the atom in the residue range, if this is false, we will optimize the entire protein
-    isotropic_parameters_lr: 0.01
+    gradient_ascent_parameters:
+      steps: 30
+      lr_t_A: 1000
+      lr_r_deg: 1000
+      reduction: "mean"
+      per_step_t_cap_voxels: 3.0
+      Bfac: 300
+      bfactor_minimum: 300
+      n_random: 20000
+      t_init_box_edge_voxels: 5.0
+      momentum_factor: 0.9
+
+    symmetry: 
+      symmetry_type: "per_blob_gradient_alignment"
+      reapply_symmetry_every: true
+
+    sinkhorn: 
+      percentage: 1.0
+      p: 2  
+      blur: 0.005
+      backend: "online" 
+      reach: 
+      scaling: 0.95
+      turn_off_after: 188
+      debug_with_rmsd: false
+      debias: false
+      guide_multimer_by_chains: true
+      threshold_to_find_chains: 0.1
+
+    dihedrals:
+      use_dihedrals: "from_nmr" # [false, "from_gt", "from_nmr"]
+      dihedral_loss_weight: 0.0
+      dihedrals_file: "pipeline_inputs/pdbs/6w0o/talos.tab" # don't have it now, so None
 
 diffusion_process:
   guidance:
-    step_size: 0.09
-    guidance_direction_scale_factor: 1.0 # this will scale the guidance direction only and not the extra optimized parameters (like bfactor)
-    normalize_gradients: true # whether to normalize the gradients or not
+    step_size: 0.1
+    guidance_direction_scale_factor: 1.0
+    normalize_gradients: true
+    guidance_scale_gradually_increase: false
 

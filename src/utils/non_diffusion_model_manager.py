@@ -6,14 +6,14 @@ from ..protenix.config import parse_configs
 from ..protenix.data.infer_data_pipeline import get_inference_dataloader
 from ..runner.inference import InferenceRunner
 from ..protenix.utils.torch_utils import to_device
-from .io import AMINO_ACID_ATOMS_ORDER
+from .io import AMINO_ACID_ATOMS_ORDER, ATOM_NAME_TO_ELEMENT, create_atom_mask
 from ..protenix.data.utils import save_structure_cif
 from tqdm import tqdm
 import os 
 from ..protenix.model.sample_confidence import logits_to_score
 import sys
 import gemmi
-from .io import load_pdb_atom_locations
+from .io import load_pdb_atom_locations, load_pdb_atom_locations_full
 from ..protenix.metrics.rmsd import self_aligned_rmsd
 
 
@@ -88,9 +88,14 @@ def atom_mask_from_residue_mask(atom_array, residue_mask):
     atom_mask = atom_mask.to(residue_mask.device)
     return atom_mask
 
-class ProteinxModelManager:
-    def __init__(self, sequence, pdb_id,
-                reference_pdb=None, # this is used for saving a pdb 
+class ProtenixModelManager:
+    def __init__(self, sequences_dictionary, pdb_id,
+                should_align_to_chains=[0],
+                assembly_identifier=None,
+                chains_to_read=[0],
+                ROI_residues = None,
+                reference_pdb=None,
+                pdb_contains_missing_atoms=False,
                 N_cycle=10, chunk_size=256, diffusion_N=200,
                 gamma0=0.8,
                 gamma_min=1.0,
@@ -100,16 +105,42 @@ class ProteinxModelManager:
                 use_deepspeed_evo_attention=False,
                 msa_save_dir="./alignment_dir",
                 msa_embedding_cache_dir="./msa_cache",
+                pairformer_mixed_precision=False,
                 model_checkpoint_path = "./src/af3-dev/release_model/model_v1.pt",
                 dump_dir = "./output",
                 use_msa=True,
                 batch_size=1,
-                device=None,
+                device="cuda" if torch.cuda.is_available() else "cpu",
                 ):
-        self.sequence = sequence
         self.pdb_id = pdb_id
         self.reference_pdb = reference_pdb
-        self.reference_atom_locations = load_pdb_atom_locations(reference_pdb)
+        self.should_align_to_chains = should_align_to_chains
+        self.sequences_dictionary = sequences_dictionary
+        self.assembly_identifier = assembly_identifier
+        self.pdb_contains_missing_atoms = pdb_contains_missing_atoms
+        self.full_sequences = [[dictionary["sequence"],]*dictionary["count"] for dictionary in sequences_dictionary]
+        # flattening the list of lists
+        self.full_sequences = [item for sublist in self.full_sequences for item in sublist]
+        self.chains_to_read = chains_to_read
+        self.ROI_residues = ROI_residues
+
+        if self.pdb_contains_missing_atoms:
+            self.reference_atom_locations, self.resolved_pdb_to_full_mask = load_pdb_atom_locations_full(
+                reference_pdb, 
+                full_sequences = self.full_sequences,
+                chains_to_read=chains_to_read,
+            )
+            self.resolved_pdb_to_full_mask = self.resolved_pdb_to_full_mask.to(device)
+        else:
+            self.reference_atom_locations = load_pdb_atom_locations(reference_pdb)
+            self.resolved_pdb_to_full_mask = torch.ones(self.reference_atom_locations.shape[1], dtype=torch.bool, device=self.reference_atom_locations.device)
+
+        # TODO: Advaith
+        if self.ROI_residues is not None:
+            self.ROI_atom_mask = create_atom_mask(self.full_sequences, ROI_residues).to(device)
+        else: 
+            self.ROI_atom_mask = torch.zeros_like(self.resolved_pdb_to_full_mask, dtype=torch.bool, device=self.reference_atom_locations.device)
+
         self.reference_atom_locations = self.reference_atom_locations.to(device)
 
         self.N_cycle = N_cycle
@@ -119,6 +150,13 @@ class ProteinxModelManager:
         self.use_deepspeed_evo_attention = use_deepspeed_evo_attention
         self.msa_save_dir = msa_save_dir
         self.msa_embedding_cache_dir = msa_embedding_cache_dir
+
+        if self.assembly_identifier is not None:
+            self.msa_full_embedding_cache_dir = os.path.join(self.msa_embedding_cache_dir, self.pdb_id, self.assembly_identifier)
+        else:
+            self.msa_full_embedding_cache_dir = os.path.join(self.msa_embedding_cache_dir, self.pdb_id)
+
+        self.pairformer_mixed_precision = pairformer_mixed_precision
         self.model_checkpoint_path = model_checkpoint_path
         self.dump_dir = dump_dir
         self.gamma0 = gamma0
@@ -128,7 +166,6 @@ class ProteinxModelManager:
         self.use_msa = use_msa
         self.batch_size = batch_size
 
-        self.runnder = None
         self.atom_array = None
         self.input_feature_dict = None
         self.eval_data_dict = None
@@ -139,37 +176,45 @@ class ProteinxModelManager:
         self.z_init = None
         self.s_inputs_init = None
 
-        self.protein_x_model = None
+        self.protenix_model = None
         self.denoise_net = None
         self.noise_schedule = None
 
         self.device = device
         self._setup(device)
     
-    def align_models_to_reference(self, strucutres):
-        atom_mask = torch.ones(strucutres.shape[1], device=strucutres.device, dtype=torch.bool)[None]
-        _, aligned_structure, _, _ = self_aligned_rmsd(strucutres, self.reference_atom_locations, atom_mask)
+    def align_models_to_reference(self, strucutres, reduced_atom_mask=None):
+        if reduced_atom_mask is not None:
+            atom_mask = reduced_atom_mask
+        else:
+            atom_mask = torch.ones(strucutres.shape[1], device=strucutres.device, dtype=torch.bool)[None]
+
+        # TODO: Fix advaith with residue range
+        _, aligned_structure, _, _ = self_aligned_rmsd( strucutres, self.reference_atom_locations, atom_mask & (~self.ROI_atom_mask.to(device=atom_mask.device)) )
         return aligned_structure
 
     def _generate_msa_configuration(self):
-        return [{
+        return [
+            {
                 "sequences": [
                     {
                         "proteinChain": {
-                            "sequence": self.sequence,
-                            "count": 1,
+                            "sequence": sequence_dict["sequence"],
+                            "count": sequence_dict["count"],
                             "msa": {
-                                "precomputed_msa_dir": f"./{self.msa_save_dir}/{self.pdb_id}/msa",
+                                "precomputed_msa_dir": f"{self.msa_save_dir}/msa/{i+1}", # each unique protein sequence has a corresponding msa folder!
                                 "pairing_db": "uniref100"
                             }
                         }
                     }
+                    for i, sequence_dict in enumerate(self.sequences_dictionary) # FIXME we should also add support for DNA/RNA and non-protein lignads here..! (but that's a long-term plan for sure)
                 ],
                 "modelSeeds": [],
-                "assembly_id": "1",
+                "assembly_id": "1" if self.assembly_identifier is None else self.assembly_identifier,
                 "name": self.pdb_id
             }
-            ]
+            
+        ]
 
     def _generate_configs(self, device=None):
         configs = {**configs_base, **{"data": data_configs}, **inference_configs}
@@ -202,44 +247,44 @@ class ProteinxModelManager:
     
     def _setup_s_init_z_init(self, inplace_safe=True):
         
-        # self.protein_x_model.input_embedder.eval()
-        # self.protein_x_model.template_embedder.eval()
-        # self.protein_x_model.msa_module.eval()
-        # self.protein_x_model.pairformer_stack.eval()
+        # self.protenix_model.input_embedder.eval()
+        # self.protenix_model.template_embedder.eval()
+        # self.protenix_model.msa_module.eval()
+        # self.protenix_model.pairformer_stack.eval()
 
         # Line 1-5
-        s_inputs = self.protein_x_model.input_embedder(
+        s_inputs = self.protenix_model.input_embedder(
             self.input_feature_dict, inplace_safe=False, chunk_size=self.chunk_size
         )  # [..., N_token, 449]
-        s_init = self.protein_x_model.linear_no_bias_sinit(s_inputs)
+        s_init = self.protenix_model.linear_no_bias_sinit(s_inputs)
         z_init = (
-            self.protein_x_model.linear_no_bias_zinit1(s_init)[..., None, :]
-            + self.protein_x_model.linear_no_bias_zinit2(s_init)[..., None, :, :]
+            self.protenix_model.linear_no_bias_zinit1(s_init)[..., None, :]
+            + self.protenix_model.linear_no_bias_zinit2(s_init)[..., None, :, :]
         )  #  [..., N_token, N_token, c_z]
         if inplace_safe:
-            z_init += self.protein_x_model.relative_position_encoding(self.input_feature_dict)
-            z_init += self.protein_x_model.linear_no_bias_token_bond(
+            z_init += self.protenix_model.relative_position_encoding(self.input_feature_dict)
+            z_init += self.protenix_model.linear_no_bias_token_bond(
                 self.input_feature_dict["token_bonds"].unsqueeze(dim=-1)
             )
         else:
-            z_init = z_init + self.protein_x_model.relative_position_encoding(self.input_feature_dict)
-            z_init = z_init + self.protein_x_model.linear_no_bias_token_bond(
+            z_init = z_init + self.protenix_model.relative_position_encoding(self.input_feature_dict)
+            z_init = z_init + self.protenix_model.linear_no_bias_token_bond(
                 self.input_feature_dict["token_bonds"].unsqueeze(dim=-1)
             )
         self.s_init = s_init
         self.z_init = z_init
         self.s_inputs_init = s_inputs
     
-    def _load_cached_msa_embedding(self):
-        file_path = os.path.join(self.msa_embedding_cache_dir, f"{self.pdb_id}.pt")
+    def _load_cached_msa_embedding(self): # not configuration anymore, the prepared msa embeddings generated using msa configs etc...! 
+        file_path = os.path.join(self.msa_full_embedding_cache_dir, f"msa.pt")
         if os.path.exists(file_path):
-            self.msa = torch.load(file_path, weights_only=False, map_location=self.device)
+            self.msa = torch.load(file_path, weights_only=False)
             self.msa.to(self.device)
     
     def _save_cache_msa_embedding(self):
-        file_path = os.path.join(self.msa_embedding_cache_dir, f"{self.pdb_id}.pt")
+        file_path = os.path.join(self.msa_full_embedding_cache_dir, f"msa.pt")
         if not os.path.exists(file_path):
-            os.makedirs(self.msa_embedding_cache_dir, exist_ok=True)
+            os.makedirs(self.msa_full_embedding_cache_dir, exist_ok=True)
             self.msa.to("cpu")
             torch.save(self.msa, file_path)
             self.msa.to(self.device)
@@ -250,9 +295,9 @@ class ProteinxModelManager:
         self.eval_data_dict, self.atom_array, _ = next(iter(dataloader))[0]
         self.runner = InferenceRunner(configs)
         device = self.runner.device
-        self.protein_x_model = self.runner.model
-        self.denoise_net = self.protein_x_model.diffusion_module
-        self.noise_schedule = self.protein_x_model.inference_noise_scheduler(
+        self.protenix_model = self.runner.model
+        self.denoise_net = self.protenix_model.diffusion_module
+        self.noise_schedule = self.protenix_model.inference_noise_scheduler(
             N_step=self.diffusion_N, device=device, dtype=torch.float32
         )
         input_feature_dict = to_device(self.eval_data_dict["input_feature_dict"], device)
@@ -265,10 +310,19 @@ class ProteinxModelManager:
 
                 s = torch.zeros_like(self.s_init)
                 z = torch.zeros_like(self.z_init)
-                self.msa = MSA(self.s_inputs_init, s, z) # saving msa because we need self.msa.s_inputs from the pairformer_cycle
-                with torch.no_grad():
-                    for _ in range(self.N_cycle):
+                # saving msa because we need self.msa.s_inputs from the pairformer_cycle
+                self.msa = MSA(self.s_inputs_init, s, z)
+
+                # some oligomeric msa and pairformers are just too big..!
+                with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16 if self.pairformer_mixed_precision else torch.float32):
+                    if self.pairformer_mixed_precision: 
+                        s = s.to(torch.bfloat16)
+                        z = z.to(torch.bfloat16)
+                    for _ in tqdm(range(self.N_cycle), desc="Pairformer Cycle"):
                         s,z = self.pairformer_cycle(s,z)
+                if self.pairformer_mixed_precision:
+                    s = s.to(torch.float32)
+                    z = z.to(torch.float32)
                 self.msa = MSA(self.s_inputs_init, s, z)
                 self._save_cache_msa_embedding()
     
@@ -278,73 +332,78 @@ class ProteinxModelManager:
         z_init = z_init if z_init is not None else self.z_init
         input_feature_dict = input_feature_dict if input_feature_dict is not None else self.input_feature_dict
 
-        z = z_init + self.protein_x_model.linear_no_bias_z_cycle(self.protein_x_model.layernorm_z_cycle(z))
-        if inplace_safe and self.protein_x_model.template_embedder.n_blocks > 0:
-            z += self.protein_x_model.template_embedder(
+        z = z_init + self.protenix_model.linear_no_bias_z_cycle(self.protenix_model.layernorm_z_cycle(z))
+        if inplace_safe and self.protenix_model.template_embedder.n_blocks > 0:
+            z += self.protenix_model.template_embedder(
                 input_feature_dict,
                 z,
                 use_memory_efficient_kernel=self.configs.use_memory_efficient_kernel,
                 use_deepspeed_evo_attention=False,
-                use_lma=self.protein_x_model.configs.use_lma,
+                use_lma=self.protenix_model.configs.use_lma,
                 inplace_safe=inplace_safe,
                 chunk_size=self.chunk_size,
             )
-        elif self.protein_x_model.template_embedder.n_blocks > 0:
-            z = z + self.protein_x_model.template_embedder(
+        elif self.protenix_model.template_embedder.n_blocks > 0:
+            z = z + self.protenix_model.template_embedder(
                 input_feature_dict,
                 z,
                 use_memory_efficient_kernel=self.configs.use_memory_efficient_kernel,
                 use_deepspeed_evo_attention=False,
-                use_lma=self.protein_x_model.configs.use_lma,
+                use_lma=self.protenix_model.configs.use_lma,
                 inplace_safe=inplace_safe,
                 chunk_size=self.chunk_size,
             )
-        z = self.protein_x_model.msa_module(
+        z = self.protenix_model.msa_module(
             input_feature_dict,
             z,
             s_inputs,
             pair_mask=None,
-            use_memory_efficient_kernel=self.protein_x_model.configs.use_memory_efficient_kernel,
+            use_memory_efficient_kernel=self.protenix_model.configs.use_memory_efficient_kernel,
             use_deepspeed_evo_attention=False,
-            use_lma=self.protein_x_model.configs.use_lma,
+            use_lma=self.protenix_model.configs.use_lma,
             inplace_safe=inplace_safe,
             chunk_size=self.chunk_size,
         )
-        s = s_init + self.protein_x_model.linear_no_bias_s(self.protein_x_model.layernorm_s(s))
-        s, z = self.protein_x_model.pairformer_stack(
+        s = s_init + self.protenix_model.linear_no_bias_s(self.protenix_model.layernorm_s(s))
+        s, z = self.protenix_model.pairformer_stack(
             s,
             z,
             pair_mask=None,
-            use_memory_efficient_kernel=self.protein_x_model.configs.use_memory_efficient_kernel,
+            use_memory_efficient_kernel=self.protenix_model.configs.use_memory_efficient_kernel,
             use_deepspeed_evo_attention=False,
-            use_lma=self.protein_x_model.configs.use_lma,
+            use_lma=self.protenix_model.configs.use_lma,
             inplace_safe=inplace_safe,
             chunk_size=self.chunk_size,
         )
         return s, z
 
     def get_confidance_scores(self, structures, inplace_safe=False):
-        plddt_pred, pae_pred, pde_pred, resolved_pred =  self.protein_x_model.run_confidence_head(
+        plddt_pred, pae_pred, pde_pred, resolved_pred =  self.protenix_model.run_confidence_head(
             input_feature_dict=self.input_feature_dict,
             s_inputs=self.msa.s_inputs,
             s_trunk=self.msa.s,
             z_trunk=self.msa.z,
             pair_mask=None,
             x_pred_coords=structures,
-            use_memory_efficient_kernel=self.protein_x_model.configs.use_memory_efficient_kernel,
+            use_memory_efficient_kernel=self.protenix_model.configs.use_memory_efficient_kernel,
             use_deepspeed_evo_attention=False,
-            use_lma=self.protein_x_model.configs.use_lma,
+            use_lma=self.protenix_model.configs.use_lma,
             inplace_safe=inplace_safe,
             chunk_size=self.chunk_size,
         )
         score = logits_to_score(plddt_pred, 0, 100, 50)
         return score
 
-    def get_t_hat(self, start_index=0):
-       c_tau_last, c_tau = self.noise_schedule[[start_index, start_index + 1]]
-       gamma = float(self.gamma0) if c_tau > self.gamma_min else 0
-       t_hat = c_tau_last * (gamma + 1)
-       return t_hat
+    def get_t_hat(self, start_index=0, end_index=None):
+        """
+        end_index to support recycling steps
+        """
+        if end_index is None:
+            end_index = start_index + 1
+        c_tau_last, c_tau = self.noise_schedule[[start_index, end_index]]
+        gamma = float(self.gamma0) if c_tau > self.gamma_min else 0
+        t_hat = c_tau_last * (gamma + 1)
+        return t_hat
     
     def get_x_start(self, batch_size=1, number_of_atoms=None):
         number_of_atoms = number_of_atoms or self.atom_array.shape[0]
@@ -352,29 +411,52 @@ class ProteinxModelManager:
             size=(batch_size, number_of_atoms, 3), device=self.runner.device, dtype=torch.float32
         )
     
-    def get_x_noisy(self, x_t, start_index=0):
-        c_tau_last = self.noise_schedule[start_index]
-        t_hat = self.get_t_hat(start_index)
-        delta_noise_level = torch.sqrt(t_hat**2 - c_tau_last**2)
-        x_noisy = x_t + self.noise_scale_lambda * delta_noise_level * torch.randn(
-                size=x_t.shape, device=x_t.device, dtype=torch.float32
-            )
-        return x_noisy
-    
-    def get_x_t_from_x_0_hat(self, x_noisy, x_0_hat, start_index, end_index=None, guidance_direction=None, step_size=1.0, normalize_gradients=False):
+    def get_x_noisy(self, x_t, start_index=0, end_index=None):
         if end_index is None:
             end_index = start_index + 1
-        c_tau = self.noise_schedule[end_index]
-        t_hat = self.get_t_hat(start_index)
-        delta = (x_noisy - x_0_hat) / t_hat[..., None, None]
 
-        if guidance_direction is not None:
-            if normalize_gradients:
-                guidance_direction = guidance_direction * delta.flatten(1,-1).norm(dim=-1)[:, None, None]
-            delta = delta + step_size * guidance_direction
-        dt = c_tau - t_hat
-        x_l = x_noisy + self.step_scale_eta * dt[..., None, None] * delta
-        return x_l
+        if end_index > start_index:
+            c_tau_last = self.noise_schedule[end_index]
+            t_hat = self.get_t_hat(end_index)
+            delta_noise_level = torch.sqrt(t_hat**2 - c_tau_last**2)
+            x_noisy = x_t + self.noise_scale_lambda * delta_noise_level * torch.randn(
+                    size=x_t.shape, device=x_t.device, dtype=torch.float32
+                )
+            return x_noisy
+        else:
+            # Take forward steps
+            sigma_start = self.noise_schedule[start_index]
+            sigma_end = self.noise_schedule[end_index]
+            std = (sigma_end**2 - sigma_start**2).sqrt()
+            eps = torch.randn(size=x_t.shape, device=x_t.device, dtype=torch.float32)
+            return x_t + self.noise_scale_lambda * std * eps
+
+    # def get_x_t_from_x_0_hat(self, x_noisy, x_0_hat, start_index, end_index=None, guidance_direction=None, step_size=1.0, normalize_gradients=False):
+    def get_x_t_from_x_0_hat(
+            self, x_noisy, x_0_hat, start_index, end_index=None, 
+            guidance_direction=None, step_size=1.0, normalize_gradients=False, normalize_by_current_gradient_strength=False,
+            structures_gradient_norm=1.0, guidance_scale_gradually_increase=False,
+        ):
+        if end_index is None:
+            end_index = start_index + 1
+        is_backward_step = end_index > start_index
+
+        if is_backward_step:
+            c_tau = self.noise_schedule[end_index]
+            t_hat = self.get_t_hat(start_index)
+            delta = (x_noisy - x_0_hat) / t_hat[..., None, None]
+
+            if guidance_direction is not None:
+                if normalize_gradients:
+                    guidance_direction = guidance_direction * delta.norm(dim=(1,2), keepdim=True) / guidance_direction.norm(dim=(1, 2), keepdim=True) * structures_gradient_norm
+                delta = delta + step_size * guidance_direction
+                
+            dt = c_tau - t_hat
+            x_l = x_noisy + self.step_scale_eta * dt[..., None, None] * delta
+            return x_l
+        else:
+            # Also, applying no guidance when adding the noise back (no need, will be applied during denoising anyway..!)
+            return x_noisy
     
     def get_x_0_hat_from_x_noisy(self, x_noisy, t_hat=None, start_index=None,msa=None,input_feature_dict=None, inplace_safe=False):
         # make sure that t_hat is not None or t is not None, but not both
@@ -433,3 +515,72 @@ class ProteinxModelManager:
 
         os.makedirs(os.path.dirname(write_file_name), exist_ok=True)
         gemmi_structure.write_pdb(write_file_name)
+
+
+def save_structure_full(structure, full_sequences, atom_array, write_file_name, bfactors=None, atom_mask=None):
+    
+    gemmi_structure = gemmi.Structure()
+    model = gemmi.Model("1") 
+    
+    chains = []
+    if atom_mask is None:
+        atom_mask = torch.ones(structure.shape[0], dtype=torch.bool)
+    
+
+    for i in range(len(full_sequences)):
+        chains.append(gemmi.Chain(chr(ord("A") + i))) # either just chain A, or chain A,B,C etc. depending on the aligomeric state..!s
+
+    iter_index = 0
+    
+    structure = structure.cpu().detach().numpy()
+    for chain_i, chain in enumerate(chains): 
+        sequence = full_sequences[chain_i]
+        for i, res_name_one_letter in enumerate(sequence): # creating the residue
+            res = gemmi.Residue()
+            res.name =  gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.AA) 
+            res.seqid = gemmi.SeqId(i + 1, " ")
+            residue_has_atoms = False  # Track if this residue has any atoms
+            
+            for atom_name in AMINO_ACID_ATOMS_ORDER[res.name]: # appending all the atoms in the residue    
+                if atom_mask[iter_index] == True:
+                    # Save this atom - it's resolved in the structure
+                    atom = gemmi.Atom()
+                    atom.name = atom_name
+                    atom.element = gemmi.Element(ATOM_NAME_TO_ELEMENT[atom_name])
+                    atom.pos = gemmi.Position(*structure[iter_index])
+                    if bfactors is not None:
+                        atom.b_iso = bfactors[iter_index]
+
+                    res.add_atom(atom)
+                    residue_has_atoms = True
+                
+                # Always increment iter_index to move through the concatenated mask
+                iter_index += 1
+            
+            # Handle OXT atom for the last residue of each chain
+            if i == len(sequence) - 1:  # Last residue in chain
+                if iter_index < len(atom_mask):
+                    if atom_mask[iter_index] == True:
+                        atom = gemmi.Atom()
+                        atom.name = "OXT"
+                        atom.element = gemmi.Element("O")
+                        atom.pos = gemmi.Position(*structure[iter_index])
+                        if bfactors is not None:
+                            atom.b_iso = bfactors[iter_index]
+
+                        res.add_atom(atom)
+                        residue_has_atoms = True
+                    
+                    # Always increment if we're within bounds (whether OXT exists or not)
+                    iter_index += 1
+
+            # Only add residue to chain if it has at least one atom
+            if residue_has_atoms:
+                chain.add_residue(res)
+    
+        model.add_chain(chain)
+    
+    gemmi_structure.add_model(model)
+    
+    os.makedirs(os.path.dirname(write_file_name), exist_ok=True)
+    gemmi_structure.write_pdb(write_file_name)

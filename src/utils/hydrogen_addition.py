@@ -813,7 +813,7 @@ def update_hydrogens_in_atom_array(atoms, hydrogen_coord, hydrogen_names):
         res_length = stop - start
         index_mapping[start:stop] = np.arange(p, p + res_length)
         original_atom_mask[p : p + res_length] = True
-        hydrogenated_atoms.coord[p : p + res_length] = atoms.coord[:, start:stop]
+        hydrogenated_atoms.coord[p : p + res_length] = atoms.coord[:,start:stop]
         for category in atoms.get_annotation_categories():
             hydrogenated_atoms.get_annotation(category)[p : p + res_length] = (
                 atoms.get_annotation(category)[start:stop]
@@ -912,16 +912,33 @@ def add_hydrogen_to_pdb(in_path, out_path=None):
     pdb_file = pdb.PDBFile.read(in_path)
     atom_array = pdb.get_structure(pdb_file, include_bonds=True)
     
-    bonds = atom_array.bonds
-    names = atom_array.atom_name
-    elements = atom_array.element
-    res_name = atom_array.res_name
     coords = torch.tensor(atom_array.coord)
     fragment_library = FragmentLibrary.standard_library()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    hydrogen_atoms_batch, naming_sample = fragment_library.calculate_hydrogen_coord_batch(coords, bonds, names, elements, res_name, device)
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"    
     name_library = AtomNameLibrary.standard_library()
-    hydrogen_names = get_hydrogen_names(atom_array, naming_sample, name_library)
+    n_chains = np.unique(atom_array.chain_id).size
+    atom_array_len = len(atom_array.atom_name)
+    num_atoms = atom_array_len//n_chains
+    starts = np.arange(0, atom_array_len, num_atoms)
+    stops = starts + num_atoms
+    chain_indices = list(zip(starts, stops))
+    
+    hydrogen_atoms_batch_all_chains = []
+    hydrogen_names_all_chains = []
+    naming_sample_all_chains = []
+    for start, stop in chain_indices:
+        chain_atom_array = atom_array[0][start:stop]
+        hydrogen_atoms_batch, naming_sample = fragment_library.calculate_hydrogen_coord_batch(coords[:, start:stop], chain_atom_array.bonds, 
+                                                                                                chain_atom_array.atom_name, chain_atom_array.element, 
+                                                                                                chain_atom_array.res_name, device)
+        hydrogen_names = get_hydrogen_names(chain_atom_array, naming_sample, name_library)
+        hydrogen_atoms_batch_all_chains += [hydrogen_atoms_batch]
+        hydrogen_names_all_chains += hydrogen_names        
+        naming_sample_all_chains += naming_sample
+
+    hydrogen_names = hydrogen_names_all_chains
+    hydrogen_atoms_batch = torch.cat(hydrogen_atoms_batch_all_chains, dim=1)
+    naming_sample = naming_sample_all_chains
+    
     hydrogen_array,_ = update_hydrogens_in_atom_array(atom_array, naming_sample, hydrogen_names)
     save_hydrogen_array(hydrogen_array, out_path)

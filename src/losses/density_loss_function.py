@@ -246,11 +246,11 @@ class DensityGuidanceLossFunction(AbstractLossFunction):
             this makes it so they only way to change the densiy is to move the atoms in the zone of interest
         """
         new_x_0_hat = x_0_hat.clone()
-        new_x_0_hat[:, ~self.residue_range_atom_mask] = self.coordinates_gt[:,~self.residue_range_atom_mask]
+        coords_gt_exp = self.coordinates_gt.expand(new_x_0_hat.size(0), -1, -1)  # [16, 2468, 3]
+        new_x_0_hat[:, ~self.residue_range_atom_mask] = coords_gt_exp[:,~self.residue_range_atom_mask]
         return new_x_0_hat
 
-
-    def __call__(self, x_0_hat, optimization_percetange):
+    def __call__(self, x_0_hat, optimization_percetange, structures=None, i=None, step=None):
         _, aligned_x_0_hat, R, T = self_aligned_rmsd(x_0_hat, self.coordinates_gt.repeat(x_0_hat.shape[0], 1, 1), (self.rmsd_aligment_atom_mask*0) + 1)
         aligned_x_0_hat = self.replace_non_residue_range_atoms(aligned_x_0_hat)
         fc = self.calcualte_fc(aligned_x_0_hat)

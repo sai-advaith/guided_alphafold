@@ -187,9 +187,7 @@ class S2LossFunction(AbstractLossFunction):
         return fig
     
 
-    def __call__(self, x_0_hat, time, hyodrogens_coords, hydrogen_names):
-        # align batch
-        # Align with the first element of the batch
+    def __call__(self, x_0_hat, time, hyodrogens_coords, hydrogen_names, structures=None, i=None, step=None):
         x_0_ref = x_0_hat[[0]]
         _, x_0_hat, rot, trans = self_aligned_rmsd(x_0_hat, x_0_ref, torch.ones(x_0_hat.shape[1], dtype=torch.bool).to(x_0_hat.device))
         

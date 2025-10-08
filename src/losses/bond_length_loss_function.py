@@ -8,13 +8,13 @@ class BondLengthLossFunction(AbstractLossFunction):
     def __init__(self, atom_array_object, device):
         self._device = device
         self._atom_array_object = atom_array_object
-        self._bonds, self._bond_lengths = self._initialize_topology_bonds()
+        self._bonds, self._bond_lengths = self._initialize_topolgy_bonds()
         self._collision_distances = self._initialize_collision_distances()
 
         self._last_bond_length_loss = None
         self._last_collision_loss = None
 
-    def _initialize_topology_bonds(self):
+    def _initialize_topolgy_bonds(self):
         # bonds and bond types, target_atom[i] = indexes of atoms bonded to atom i, padded with -1
         target_atom, _ = connect_via_residue_names(self._atom_array_object).get_all_bonds()
         bonds = set()
@@ -42,7 +42,7 @@ class BondLengthLossFunction(AbstractLossFunction):
     def bond_length_loss(self, atom_locations, threshold=0.2 , l=2):
         bond_lengths = (atom_locations[:, self._bonds[...,0]] - atom_locations[:, self._bonds[...,1]]).norm(dim=-1)
         bond_lengths_diff = ((bond_lengths - self._bond_lengths).abs() - threshold).relu()
-        return bond_lengths_diff.pow(l).sum()
+        return bond_lengths_diff.pow(l).sum() / atom_locations.shape[0]
     
     def collision_loss(self, atom_locations, padding = 0.4):
         distances = (atom_locations[:,:, None] - atom_locations[:,None]).norm(dim=-1)
@@ -53,7 +53,7 @@ class BondLengthLossFunction(AbstractLossFunction):
         mask[:, self._bonds[...,1], self._bonds[...,1]] = 3
         distances = distances + mask
         threshold_loss = (self._collision_distances + padding - distances).max(dim=0)[0].relu()
-        return threshold_loss.sum()
+        return threshold_loss.sum() / atom_locations.shape[0]
     
     def get_bond_loss(self, atom_locations):
         bond_length_loss = self.bond_length_loss(atom_locations)
@@ -61,9 +61,9 @@ class BondLengthLossFunction(AbstractLossFunction):
         loss_values = bond_length_loss + collision_loss
         self._last_bond_length_loss = bond_length_loss.item()
         self._last_collision_loss = collision_loss.item()
-        return loss_values
+        return loss_values 
     
-    def __call__(self, x_0_hat, time):
+    def __call__(self, x_0_hat, time, structures=None, i=None, step=None):
         return self.get_bond_loss(x_0_hat), None
     
     def wandb_log(self, x_0_hat):
