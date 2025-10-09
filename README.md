@@ -20,9 +20,24 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    conda activate guided_af3
    ```
 
+2. **Download Protenix model weights and data:**
+   
+   This pipeline is built on top of [Protenix](https://github.com/bytedance/Protenix), a PyTorch reproduction of DeepMind's AlphaFold3. Download the required pre-trained model weights and chemical component data files:
+   
+   ```bash
+   # Download model weights (v0.2.0)
+   wget -P src/af3-dev/release_model/ https://af3-dev.tos-cn-beijing.volces.com/release_model/model_v0.2.0.pt
+   
+   # Download chemical component dictionary files
+   wget -P src/af3-dev/release_data/ https://af3-dev.tos-cn-beijing.volces.com/release_data/components.v20240608.cif
+   wget -P src/af3-dev/release_data/ https://af3-dev.tos-cn-beijing.volces.com/release_data/components.v20240608.cif.rdkit_mol.pkl
+   ```
+   
+   For more information, visit the Protenix repository: https://github.com/bytedance/Protenix
+
 ### External Dependencies
 
-2. **END RAPID (for X-ray absolute scale maps):**
+3. **END RAPID (for X-ray absolute scale maps):**
    
    Download and install the END RAPID script for rendering absolute scale electron density maps:
    ```bash
@@ -32,19 +47,19 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    
    Installation manual: https://bl831.als.lbl.gov/END/RAPID/end.rapid/Documentation/end.rapid.Manual.htm#InstallationInstructions
 
-3. **Phenix 1.21.2 (for X-ray and Cryo-EM):**
+4. **Phenix 1.21.2 (for X-ray and Cryo-EM):**
    
    Required for structure refinement and validation metrics.
    
    Download from: http://www.phenix-online.org/
 
-4. **CCP4 8.0 (for X-ray):**
+5. **CCP4 8.0 (for X-ray):**
    
    Required for crystallographic computations and map processing.
    
    Download from: http://www.ccp4.ac.uk/
 
-5. **AMBER99 relaxation using AlphaFold2 (X-ray and NMR):**
+6. **AMBER99 relaxation using AlphaFold2 (X-ray and NMR):**
    
    Recommended for final structure relaxation.
    
