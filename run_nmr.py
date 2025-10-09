@@ -30,8 +30,7 @@ def main():
     # Metrics!
     output_directory = os.path.join(config.general.output_folder, config.general.name)
     metrics_results_path = os.path.join(output_directory, "diffusion_process", f"{config.protein.pdb_id}_metrics.csv")
-    run_nmr_metrics(pdb_output_folder=output_directory, md_file=config.protein.reference_pdb,
-    restraint_file=config.loss_function.nmr_loss_function.reference_nmr, add_hydrogen=True, relax_colabfold=True, results_path=metrics_results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False)
+    run_nmr_metrics(pdb_output_folder=output_directory, md_file=config.protein.reference_pdb, restraint_file=config.loss_function.nmr_loss_function.reference_nmr, add_hydrogen=True, relax_colabfold=True, results_path=metrics_results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False)
 if __name__ == "__main__":
     main()
 

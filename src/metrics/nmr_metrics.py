@@ -241,33 +241,3 @@ def run_nmr_metrics(pdb_output_folder, md_file, restraint_file, add_hydrogen, re
     results = process_file(restraint_file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdb_output_folder, md_file, order_params_files)
     results = pd.DataFrame(results)
     results.to_csv(results_path, index=False)
-
-# def main(args):
-#     evaluations = {"noe":args.noe, "s2":args.order_params} 
-
-#     results_path = args.results_path
-#     add_hydrogen = args.add_hydrogen
-#     relax_colabfold = args.relax_colabfold
-    
-#     results = process_file(args.restraint_file, add_hydrogen, relax_colabfold, evaluations, args.additional_protein_files, args.pdbs_output_folder)
-#     results = pd.DataFrame(results) 
-#     results.to_csv(results_path)
-
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description="Run NMR restraint processing pipeline.")
-#     parser.add_argument("--results_path", "-r",type=str,required=False,default="test.csv",help="Path to save the results CSV.")
-#     parser.add_argument("--add_hydrogen", action="store_true", help="Enable adding hydrogens.")
-#     parser.add_argument("--relax_colabfold", action="store_true",help="Relax CollabFold models before evaluation.") 
-#     parser.add_argument("--noe", action="store_true",help="Evaluate NOE restraints.")
-#     parser.add_argument("--order_params", action="store_true",help="Evaluate order parameters.")
-#     parser.add_argument("--restraint_file",type=str, required=True, help="Restraint file.") 
-#     parser.add_argument("--MD_file",type=str, required=True ,help="MD file for comparison.") 
-#     parser.add_argument("--additional_protein_files",nargs="+", required=False, help="List of addtional pdb files.")
-#     parser.add_argument("--pdbs_output_folder",type=str, required=True, help="Folder with the result of the guidance output.") 
-#     parser.add_argument("--order_params_files", type=json.loads, default={
-#         "amide_relax": "pipeline_inputs/nmr_s_2/ubi_solution_S2.csv",
-#         "amide_rdc": "pipeline_inputs/nmr_s_2/ubi_nh_rdc.csv",
-#         "methyl_relax": "pipeline_inputs/nmr_s_2/ubi_methyl_relaxation.csv",
-#         "methyl_rdc": "pipeline_inputs/nmr_s_2/ubi_methyl_rdc.csv"}, required=False, help="JSON dictionary of order parameters input files. Keep keys the same, change only the values.")
-#     args = parser.parse_args()
-#     main(args)

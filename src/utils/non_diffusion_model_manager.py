@@ -450,7 +450,7 @@ class ProtenixModelManager:
                 if normalize_gradients:
                     guidance_direction = guidance_direction * delta.norm(dim=(1,2), keepdim=True) / guidance_direction.norm(dim=(1, 2), keepdim=True) * structures_gradient_norm
                 delta = delta + step_size * guidance_direction
-                
+
             dt = c_tau - t_hat
             x_l = x_noisy + self.step_scale_eta * dt[..., None, None] * delta
             return x_l
