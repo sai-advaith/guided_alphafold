@@ -84,7 +84,6 @@ python3 run_em.py <pdb_id> <emdb_id> <renumbered_file_path> <assembly_identifier
 - `--wandb_project`: Weights & Biases project name
 - `--device`: Compute device (default: `cuda:0`)
 
-The renumbered file is the path to the PDB file containing atomic coordinates where the residues were renumbered to match the absolute 1-index of the residues of the sequence.
 **Example:**
 ```bash
 python3 run_em.py 7dac 30622 pdb7dac_seqaligned_short.pdb amyloid_7dac_short_mmseq2 \
@@ -93,6 +92,7 @@ python3 run_em.py 7dac 30622 pdb7dac_seqaligned_short.pdb amyloid_7dac_short_mms
     --counts 3 \
     --device cuda:0
 ```
+The renumbered file is the path to the PDB file containing atomic coordinates where the residues were renumbered to match the absolute 1-index of the residues of the sequence. An example `pdb7dac_seqaligned_short.pdb` is included in the repository.
 
 ### 2. X-ray Crystallography Guided Structure Prediction
 
