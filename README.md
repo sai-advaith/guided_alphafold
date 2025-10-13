@@ -73,7 +73,7 @@ The pipeline processes experimental data, runs experiment-guided structure predi
 
 3. **END RAPID (for X-ray absolute scale maps):**
    
-   Download and install the END RAPID script for rendering absolute scale electron density maps:
+   Download and install the END RAPID script for rendering absolute scale electron density maps (CCP4 8.0 and Phenix 1.21.2):
    ```bash
    wget https://bl831.als.lbl.gov/END/RAPID/end.rapid/Distributions/end.rapid.tar.gz
    tar -xzf end.rapid.tar.gz
