@@ -14,13 +14,47 @@ The pipeline processes experimental data, runs experiment-guided structure predi
 
 ### Environment Setup
 
-1. **Create the conda environment:**
+1. **Setup the environment:**
+
+   Create a fresh conda environment with Python 3.11:
    ```bash
-   conda env create -f environment.yml
+   conda create -n guided_af3 python=3.11
    conda activate guided_af3
    ```
+   Install the core scientific stack:
+   ```bash
+   pip3 install numpy==1.26.4 scipy==1.15.0 pandas==2.2.0 matplotlib==3.9.0 scikit-learn==1.2.0 scikit-learn-extra==0.3.0 skan==0.13.0 scikit-image==0.24.0 imageio==2.37.0 cvxpy==1.6.6 cvxpylayers==0.1.9
+   ```
+   Install bioinformatics and structure libraries:
+   ```bash
+   pip3 install biopython==1.83 biotite==1.0.1 gemmi==0.6.5 rdkit==2023.09.6 dm-tree==0.1.8 py3dmol==2.4.2 modelcif==0.7 loco-hd==0.1.4 pynmrstar==3.3.5 ml-collections==0.1.1
+   ```
+   Install utilities and logging:
+   ```bash
+   pip3 install tqdm pyyaml ipywidgets wandb==0.19.4 ipdb==0.13.13 icecream==2.1.4 hydride==1.2.3 pydantic==2.10.6 pdbeccdutils==0.8.5
+   ```
+   Install PyTorch with CUDA 12.1:
+   ```bash
+   pip3 install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+   ```
+   Install AlphaFold-related JAX / TF packages (CPU-only here):
+   ```bash
+   pip3 install absl-py==1.0.0 dm-haiku==0.0.12 docker==5.0.0 jax==0.4.26 jaxlib==0.4.26 tensorflow-cpu==2.16.1 "pytest<8.5.0" "setuptools<72.0.0"
+   ```
+   Install Keops
+   ```bash
+   pip3 install pykeops==2.3 geomloss==0.2.6
+   python3
+   >>> import keops; pykeops.test_torch_bindings() # test keops install
+   ```
+   Install PDBFixer (https://htmlpreview.github.io/?https://github.com/openmm/pdbfixer/blob/master/Manual.html)
+   ```bash
+   git clone https://github.com/openmm/pdbfixer.git
+   cd pdbfixer
+   python setup.py install 
+   ```
 
-2. **Download Protenix model weights and data:**
+3. **Download Protenix model weights and data:**
    
    This pipeline is built on top of [Protenix](https://github.com/bytedance/Protenix), a PyTorch reproduction of DeepMind's AlphaFold3. Download the required pre-trained model weights and chemical component data files:
    
@@ -44,7 +78,15 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    wget https://bl831.als.lbl.gov/END/RAPID/end.rapid/Distributions/end.rapid.tar.gz
    tar -xzf end.rapid.tar.gz
    ```
-   
+   Setup environment path:
+   ```bash
+   export PATH=<directory_path>:$PATH
+   ```
+   Move the script to root:
+   ```bash
+   cp end.rapid/END_RAPID.com .
+   chmod +x END_RAPID.com
+   ```
    Installation manual: https://bl831.als.lbl.gov/END/RAPID/end.rapid/Documentation/end.rapid.Manual.htm#InstallationInstructions
 
 4. **Phenix 1.21.2 (for X-ray and Cryo-EM):**
@@ -62,9 +104,12 @@ The pipeline processes experimental data, runs experiment-guided structure predi
 6. **AMBER99 relaxation using AlphaFold2 (X-ray and NMR):**
    
    Recommended for final structure relaxation.
-   
-   Download from: https://github.com/google-deepmind/alphafold
-
+   ```bash
+   git clone https://github.com/google-deepmind/alphafold
+   cd alphafold/
+   python3 setup.py install
+   ```
+   Follow instructions in AlphaFold2 repository (https://github.com/google-deepmind/alphafold) to install `
 ## Usage
 
 ### 1. Cryo-EM Guided Structure Prediction
@@ -73,6 +118,7 @@ Fits protein structures to electrostatic potential maps using cryo-EM data from 
 
 **Command:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_em.py <pdb_id> <emdb_id> <renumbered_file_path> <assembly_identifier> \
     --phenix_setup_sh <phenix_setup_path> \
     --sequences <seq1> <seq2> ... \
@@ -101,6 +147,7 @@ python3 run_em.py <pdb_id> <emdb_id> <renumbered_file_path> <assembly_identifier
 
 **Example:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_em.py 7dac 30622 pdb7dac_seqaligned_short.pdb amyloid_7dac_short_mmseq2 \
     --phenix_setup_sh  /opt/ccp4-8.0/bin/ccp4.setup-sh \
     --sequences PLVNIYNCSGVQVGDNNYLTMQQT \
@@ -115,6 +162,7 @@ Generates ensemble structures fitted to X-ray crystallographic electron density 
 
 **Command:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_xray.py <pdb_id> <chain_id> <region_sub_sequence> \
     --ccp4_setup_sh <ccp4_setup_path> \
     --phenix_setup_sh <phenix_setup_path> \
@@ -131,13 +179,14 @@ python3 run_xray.py <pdb_id> <chain_id> <region_sub_sequence> \
 **Optional Parameters:**
 - `--input_directory`: Directory for input files (default: `pipeline_inputs`)
 - `--output_directory`: Directory for output files (default: `pipeline_outputs`)
-- `--map_type`: Type of electron density map to use: `2fofc` (standard) or `end` (absolute scale END map) (default: `end`)
+- `--map_type`: Type of electron density map to use: `2fofc` (standard and quicker) or `end` (absolute scale END map and slower) (default: `end`)
 - `--wandb_key`: Weights & Biases API key for experiment tracking
 - `--wandb_project`: Weights & Biases project name  
 - `--device`: Compute device (default: `cuda:0`)
 
 **Example:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_xray.py 2izr A SLTGT \
     --ccp4_setup_sh /opt/ccp4-8.0/bin/ccp4.setup-sh \
     --phenix_setup_sh /opt/phenix-1.21.2/phenix_env.sh \
@@ -151,6 +200,7 @@ Fits protein structures to NMR experimental restraints including NOE distances, 
 
 **Command:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_nmr.py <pdb_id> [OPTIONS]
 ```
 
@@ -171,6 +221,7 @@ python3 run_nmr.py <pdb_id> [OPTIONS]
 
 **Example:**
 ```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
 python3 run_nmr.py 1u0p \
     --input_directory nmr_pipeline_inputs \
     --output_directory nmr_pipeline_outputs \

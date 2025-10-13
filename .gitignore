@@ -195,6 +195,9 @@ pipeline_outputs*
 xray_outputs/*
 natbiotech_outputs_xray/*
 
+pdbfixer/
+alphafold/
+
 END_RAPID.com
 map_vacuum_level.com
 end.rapid/

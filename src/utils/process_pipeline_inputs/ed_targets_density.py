@@ -43,9 +43,11 @@ def end_cleanup(pdb, chain, current_dir, density_dir):
 
     # Remove extensions
     extensions_to_remove = [".map", ".ccp4", ".eff", ".geo", ".mtz", ".def", ".pdb", ".cif", ".txt", ".log"]
+    ignore_file_names = ["7dac_short_seqaligned.pdb", "pdb7dac_seqaligned_short.pdb"]
     for extension in extensions_to_remove:
         for file_name in os.listdir(current_dir):
-            if file_name.endswith(extension):
+            # DO NOT REMOVE EM TEMPLATE FILES
+            if file_name.endswith(extension) and file_name not in ignore_file_names:
                 os.remove(file_name)
 
 def cleanup_2fofc(pdb, chain, current_dir, density_dir):
@@ -53,9 +55,11 @@ def cleanup_2fofc(pdb, chain, current_dir, density_dir):
 
     # Remove extensions
     extensions_to_remove = [".ccp4", ".pdb"]
+    ignore_file_names = ["7dac_short_seqaligned.pdb", "pdb7dac_seqaligned_short.pdb"]
     for extension in extensions_to_remove:
         for file_name in os.listdir(current_dir):
-            if file_name.endswith(extension):
+            # DO NOT REMOVE EM TEMPLATE FILES
+            if file_name.endswith(extension) and file_name not in ignore_file_names:
                 os.remove(file_name)
 
 def get_end_maps(carve_pdb_path, chain, ccp4_setup_sh, phenix_setup_sh, pdbs_list=["3ohe"], root="pipeline_inputs"):
