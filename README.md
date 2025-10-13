@@ -45,7 +45,7 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    ```bash
    pip3 install pykeops==2.3 geomloss==0.2.6
    python3
-   >>> import keops; pykeops.test_torch_bindings() # test keops install
+   >>> import pykeops; pykeops.test_torch_bindings() # test keops install
    ```
    Install PDBFixer (https://htmlpreview.github.io/?https://github.com/openmm/pdbfixer/blob/master/Manual.html)
    ```bash
