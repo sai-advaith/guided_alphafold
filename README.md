@@ -240,9 +240,33 @@ The pipeline supports experiment tracking via Weights & Biases (wandb). To enabl
    ```
 
 ## Citation
-
-Soon.
-
+Please cite the following papers if you use this software:
+```
+@article{maddipatla2025experiment,
+  title={Experiment-guided AlphaFold3 resolves accurate protein ensembles},
+  author={Maddipatla, Advaith and Bojan Sellam, Nadav and Bojan, Meital and Masalitin, Volodymyr and Vedula, Sanketh and Schanda, Paul M and Marx, Ailie and Bronstein, Alexander M},
+  journal={bioRxiv},
+  pages={2025--10},
+  year={2025},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```
+```
+@inproceedings{maddipatla2025inverse,
+  title={Inverse problems with experiment-guided AlphaFold},
+  author={Maddipatla, Advaith and Sellam, Nadav Bojan and Bojan, Meital and Vedula, Sanketh and Schanda, Paul and Marx, Ailie and Bronstein, Alex M},
+  year={2025}
+  booktitle={Forty-second International Conference on Machine Learning},
+}
+```
+```
+@article{maddipatla2024generative,
+  title={Generative modeling of protein ensembles guided by crystallographic electron densities},
+  author={Maddipatla, Sai Advaith and Sellam, Nadav Bojan and Vedula, Sanketh and Marx, Ailie and Bronstein, Alex},
+  journal={arXiv preprint arXiv:2412.13223},
+  year={2024}
+}
+```
 ## License
 
 Soon.
