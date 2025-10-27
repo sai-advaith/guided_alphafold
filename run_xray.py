@@ -34,6 +34,10 @@ def main():
         config = load_config(guided_config_file_path)
         pipeline = ExperimentManager(config, args.device)
 
+        # Seeding the experiment
+        ExperimentManager.seed_experiment(config.general.seed)
+
+        # Running the experiment
         print("Running guidance!")
         pipeline.run()
 

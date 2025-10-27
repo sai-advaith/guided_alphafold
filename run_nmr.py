@@ -22,8 +22,13 @@ def main():
     # Prepare config file
     config_file_path = preprocess_nmr_inputs(args.pdb_id, args.input_directory, args.output_directory, args.wandb_key, args.wandb_project, args.methyl_rdc_file, args.amide_rdc_file, args.amide_relax_file, args.methyl_relax_file)
 
-    # Run guidance
+    # Loading the config file and merging it with the arguments
     config = load_config(config_file_path)
+
+    # Seeding the experiment
+    ExperimentManager.seed_experiment(config.general.seed)
+
+    # Running the experiment
     pipeline = ExperimentManager(config, args.device)
     pipeline.run()
 

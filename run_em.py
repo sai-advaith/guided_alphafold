@@ -40,8 +40,13 @@ def main():
     # Get the config file
     em_config_file_path = preprocess_em_inputs(args.pdb_id, args.sequences, args.counts, args.sequence_types, args.emdb_id, args.renumbered_file_path, args.assembly_identifier, args.input_directory, args.output_directory, args.wandb_key, args.wandb_project, args.dihedrals_file, args.noe_restraints_file, args.noe_pdb_file)
 
-    # Run the experiment
+    # Loading the config file and merging it with the arguments
     config = load_config(em_config_file_path)
+
+    # Seeding the experiment
+    ExperimentManager.seed_experiment(config.general.seed)
+
+    # Running the experiment
     pipeline = ExperimentManager(config, args.device)
     pipeline.run()
 
