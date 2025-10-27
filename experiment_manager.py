@@ -36,25 +36,7 @@ class ExperimentManager:
         else:
             self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.general.name)
 
-        os.makedirs(self.experiment_save_dir, exist_ok=True)
-
-        # Deterministic settings
-        np.random.seed(self.config.general.seed)
-        torch.manual_seed(self.config.general.seed)
-        torch.cuda.manual_seed(self.config.general.seed)
-        random.seed(self.config.general.seed)
-
-        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
-        torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        # Make torch.cdist deterministic
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-
-        # Disable mixed precision for maximum determinism
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        os.makedirs(self.experiment_save_dir, exist_ok=True)      
 
     def _setup_wandb(self):
         if self.config.wandb.login_key is not None:
@@ -425,3 +407,21 @@ class ExperimentManager:
         relaxed_files = self.relax_files(un_broken_files)
         aligned_files = self.align_relaxed_samples(relaxed_files, self.config.protein.reference_pdb, self.config.protein.residue_range[0], self.device)
         return aligned_files
+
+    @staticmethod
+    def seed_experiment(seed):
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        random.seed(seed)
+
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
