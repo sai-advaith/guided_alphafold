@@ -425,3 +425,44 @@ class ExperimentManager:
         relaxed_files = self.relax_files(un_broken_files)
         aligned_files = self.align_relaxed_samples(relaxed_files, self.config.protein.reference_pdb, self.config.protein.residue_range[0], self.device)
         return aligned_files
+
+    @staticmethod
+    def seed_experiment(seed):
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        random.seed(seed)
+
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
+
+# QoL change. Never to be pushed. 
+
+def main(args):
+    file_path = args.configuration_file
+    device = args.device
+    config = load_config(file_path)
+    pipeline = ExperimentManager(config, device, file_path)
+    pipeline.run()
+    
+    if config.loss_function.loss_function_type == "density": 
+        pipeline.calculate_density_metrics()
+    if config.loss_function.loss_function_type == "sf":
+        pipeline.loss_function.save_structure_factors(pipeline.structures, os.path.join(pipeline.experiment_save_dir,"diffusion_guidance", "fc.ccp4"))
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--configuration_file', type=str, required=False, help="the path to the configuration file", default="pipeline_configurations/baseline.yaml")
+    parser.add_argument('--device', type=str, required=False, default="cuda:0")
+    args = parser.parse_args()
+    main(args)
