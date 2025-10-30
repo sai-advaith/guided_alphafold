@@ -447,9 +447,14 @@ class ExperimentManager:
 # QoL change. Never to be pushed. 
 
 def main(args):
+    # For this branch, only Cryo stuff is assumed to happen.
     file_path = args.configuration_file
     device = args.device
     config = load_config(file_path)
+
+    # Run the experiment 
+    ExperimentManager.seed_experiment(config.general.seed)
+
     pipeline = ExperimentManager(config, device, file_path)
     pipeline.run()
     
@@ -457,6 +462,10 @@ def main(args):
         pipeline.calculate_density_metrics()
     if config.loss_function.loss_function_type == "sf":
         pipeline.loss_function.save_structure_factors(pipeline.structures, os.path.join(pipeline.experiment_save_dir,"diffusion_guidance", "fc.ccp4"))
+
+    # TODO: add the Cryo stuff evaluation runner. 
+
+    
 
 if __name__ == "__main__":
     import argparse
