@@ -38,9 +38,28 @@ AMINO_ACID_ATOMS_ORDER = {
     "TYR": ["N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"],
     "VAL": ["N", "CA", "C", "O", "CB", "CG1", "CG2"],
     "CSO": ["N", "CA", "C", "O", "CB", "SG", "OD"]
+} # NOTE: OXT is added for the last reisdue. 
+
+DNA_ATOMS_ORDER = {
+
+}
+
+RNA_ATOMS_ORDER = { # "'"" is an important part of convential naming. 
+    "A": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+    "U": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "G": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "C": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+} # NOTE: if the first nucleotide, 'OP3' is added. If the last, nothing is added [unlike OXT for proteins]
+
+DNA_ATOMS_ORDER = {
+    "DT": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C7', 'C6'],
+    "DC": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+    "DG": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "DA": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
 }
 
 ATOM_NAME_TO_ELEMENT = {
+    # From AA
     "N": "N",
     "CA": "C",
     "C": "C",
@@ -78,7 +97,26 @@ ATOM_NAME_TO_ELEMENT = {
     "SD": "S",
     "SG": "S",
     "SE": "Se",
-    "OXT": "O"
+    "OXT": "O",
+    # From RNA
+    "P": "P", "OP1": "O", "OP2": "O", 
+    "O5'": "O", "C5'": "C", "C4'": "C", "O4'": "O", 
+    "C3'": "C", "O3'": "O", "C2'": "C", "O2'": "O", "C1'": "C", 
+    "N9": "N", "C8": "C", "N7": "N", "C5": "C", "C6": "C", 
+    "N6": "N", "N1": "N", "C2": "C", "N3": "N", "C4": "C", 
+    "O2": "O", "O4": "O", "O6": "O", "N2": "N", "N4": "N", "OP3": "O", 
+    "O7": "O", "C7": "C",
+}
+
+SEQUENCE_TYPE_TO_ATOM_DICTIONARY = {
+    "proteinChain": AMINO_ACID_ATOMS_ORDER,
+    "rnaSequence": RNA_ATOMS_ORDER,
+    "dnaSequence": DNA_ATOMS_ORDER,
+}
+SEQUENCE_TYPE_TO_RESIDUE_KIND = {
+    "proteinChain": gemmi.ResidueKind.AA,
+    "rnaSequence": gemmi.ResidueKind.RNA,
+    "dnaSequence": gemmi.ResidueKind.DNA,
 }
 
 class WandbLogger:
@@ -101,8 +139,21 @@ def filter_in_residue_bfactor(bfactor, residue_mask):
     return bfactor
 
 def load_pdb_atom_locations_full(
-        pdb_file, full_sequences, chains_to_read=None, return_bfacs=False, return_mask=True, return_elements=False,
+        pdb_file, 
+        full_sequences, 
+        chains_to_read=None, 
+        return_bfacs=False, 
+        return_mask=True, 
+        return_elements=False,
+        sequence_types=None, 
 ):
+    """
+    "sequence_types" is a list of strings, each string being one of the following: "proteinChain", "rnaSequence", "dnaSequence".
+    If empty, all the sequences are assumed to be protein chains.
+    """
+    if sequence_types is None:
+        sequence_types = ["proteinChain"] * len(full_sequences)
+
     # 0. Importing structures
     structure = gemmi.read_structure(pdb_file) 
 
@@ -117,39 +168,54 @@ def load_pdb_atom_locations_full(
     # 1.0 Cleaning if needed
     try: # hydrogens are being removed regardless.
         structure.remove_hydrogens()
-        structure.remove_ligands_and_waters()
+        structure.remove_ligands_and_waters() # NOTE: DNA is not removed since we are supporting DNA and RNA as input as well
     except:
         print("Hydrogens or ligands failed to be removed. Continuing without removing them..!")
 
     # 3. Instantiating the positions and masked depending on the oligomeric state of the protein! We are still going from the fact that the sequence is an oligomer
     mask = [ 
         [
-            [[0]] * len(AMINO_ACID_ATOMS_ORDER[ gemmi.expand_one_letter(one_letter_code, gemmi.ResidueKind.AA) ]) 
+            [[0]] * len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][ gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) ]) 
             for one_letter_code in full_sequence 
-        ] for full_sequence in full_sequences
+        ] for full_sequence, sequence_type in zip(full_sequences, sequence_types)
     ]
     atom_positions_full_perresidue = [ 
         [
-            [[0,0,0]] * len(AMINO_ACID_ATOMS_ORDER[ gemmi.expand_one_letter(one_letter_code, gemmi.ResidueKind.AA)]) 
+            [[0,0,0]] * len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][ gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type])]) 
             for one_letter_code in full_sequence 
-        ] for full_sequence in full_sequences
+        ] for full_sequence, sequence_type in zip(full_sequences, sequence_types)
     ]
+    
+    # Adding OXT or OP3 to the corresponding places in each chain.
     for i in range(len(mask)):
-        mask[i][-1].append([0]) # adding OXT to each last residue in each chain
-        atom_positions_full_perresidue[i][-1].append([0,0,0]) 
+        if sequence_types[i] == "proteinChain":
+            mask[i][-1].append([0]) # adding OXT to each last residue in each chain
+            atom_positions_full_perresidue[i][-1].append([0,0,0]) 
+        elif sequence_types[i] == "rnaSequence":
+            mask[i][0].append([0]) # adding OP3 to each last residue in each chain
+            atom_positions_full_perresidue[i][0].append([0,0,0]) 
+        elif sequence_types[i] == "dnaSequence":
+            mask[i][0].append([0]) # adding OP3 to each last residue in each chain
+            atom_positions_full_perresidue[i][0].append([0,0,0]) 
 
     if return_bfacs: # Doing the same for b-factors..!
         b_factors = deepcopy(mask) 
     if return_elements: # and for elements too..!
         elements = deepcopy(mask) 
 
-    # 4. Run the actual cycle to carefully import the atoms and chains
-    chains = [structure[0][chain_i] for chain_i in chains_to_read] # we always take the first model, and the according chains of the first model!
+    # Preparing the chains 
+    # First reading all the chains in the first model
+    chains = [chain for chain in structure[0]]
+    # Then reordering them by name in the alphabetic order
+    reordering_indices = np.argsort([chain.name for chain in chains])
     chains = [
-        chains[sorted_i] for sorted_i in np.argsort([chain.name for chain in chains])
-    ] # reordering by name: in the alphabetic order..!
-    #chain_seqs = 
+        chains[sorted_i] for sorted_i in reordering_indices
+    ] 
+    #sequence_types_reordered = [sequence_types[chain_i] for chain_i in reordering_indices]
+    # Then only working with the chains that are in the chains_to_read list [assumed alphabetical order]
+    chains = [structure[0][chain_i] for chain_i in chains_to_read] # we always take the first model, and the according chains of the first model!
 
+    # 4. Carefully running the reading cycle
     for chain_i, chain in enumerate(chains):
         for residue_i, residue in enumerate(chain): 
             residue_index_in_pdb = residue.seqid.num - 1 # converting from the pdb 1-index to the proper 0-index (we go from the assimption that all the )
@@ -159,9 +225,18 @@ def load_pdb_atom_locations_full(
                 continue
 
             for atom_i, atom in enumerate(residue):
+                # Finding the correct index of the resolved pdb in the full sequence array. 
+                # DNA and proteinChain have special positions for the last and first and the last atom respectively. These should be taken care of. 
+                if sequence_types[chain_i] == "proteinChain" and atom.name == "OXT":
+                    atom_index_in_pdb = -1
+                elif sequence_types[chain_i] == "rnaSequence" and atom.name == "OP3":
+                    atom_index_in_pdb = 0
+                elif sequence_types[chain_i] == "dnaSequence" and atom.name == "OP3": # NOTE TODO: WE DID NOT CHECK HOW THE DNA SEQUENCES LOOK YET!!
+                    atom_index_in_pdb = 0
+                else:
+                    # If no special position -> we should be able to find the index in the regular way
+                    atom_index_in_pdb = SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_types[chain_i]][residue.name].index(atom.name)
                 
-                atom_index_in_pdb = AMINO_ACID_ATOMS_ORDER[residue.name].index(atom.name) \
-                    if atom.name != "OXT" else -1 # in case of OXT, simply put at the last position in the residue array..!
                 atom_positions_full_perresidue[chain_i][residue_index_in_pdb][atom_index_in_pdb] = (atom.pos.x, atom.pos.y, atom.pos.z)
                 mask[chain_i][residue_index_in_pdb][atom_index_in_pdb] = [1]
 
@@ -184,28 +259,37 @@ def load_pdb_atom_locations_full(
         to_return.append(b_factors_tensor)
 
     if return_elements:
-        elements = create_full_element_list(full_sequences)
+        elements = create_full_element_list(full_sequences, sequence_types)
         to_return.append(elements)
 
     return to_return
 
 def create_full_element_list(
-        sequences:str
+        sequences:str, sequence_types: list[str] # the order is already matching
 ):
     """
     Creating full element list in case some elements are unresolved in the original pdb file
     """
     residue_lists_per_sequence = [
-        [gemmi.expand_one_letter(one_letter_code, gemmi.ResidueKind.AA) for one_letter_code in sequence]
-        for sequence in sequences
+        [
+            gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) 
+            for one_letter_code in sequence
+        ]
+        for sequence, sequence_type in zip(sequences, sequence_types)
     ]
     residue_lengths_per_sequence = [
-        [len(AMINO_ACID_ATOMS_ORDER[residue]) for residue in residue_list]
-        for residue_list in residue_lists_per_sequence
+        [
+            len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][residue]) 
+            for residue in residue_list
+        ]
+        for residue_list, sequence_type in zip(residue_lists_per_sequence, sequence_types)
     ]
     atoms_per_residue_per_sequence = [
-        [AMINO_ACID_ATOMS_ORDER[residue] for residue in residue_list]
-        for residue_list in residue_lists_per_sequence
+        [
+            SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][residue] 
+            for residue in residue_list
+        ]
+        for residue_list, sequence_type in zip(residue_lists_per_sequence, sequence_types)
     ]
 
     atomic_numbers_per_sequence = [
@@ -217,8 +301,14 @@ def create_full_element_list(
         for j, atomic_list in enumerate(atoms_per_residue):
             for k, atom_name in enumerate(atomic_list): 
                 atomic_numbers_per_sequence[i][j][k] = gemmi.Element(ATOM_NAME_TO_ELEMENT[atom_name]).atomic_number
-        # adding OXT to the last residue always! 
-        atomic_numbers_per_sequence[i][-1].append(8)
+        
+        # Adding special residues 
+        if sequence_types[i] == "proteinChain":
+            atomic_numbers_per_sequence[i][-1].append(gemmi.Element("O").atomic_number) # OXT is at the end
+        elif sequence_types[i] == "rnaSequence":
+            atomic_numbers_per_sequence[i][0].insert(0, gemmi.Element("O").atomic_number) # OP3 is at the start
+        elif sequence_types[i] == "dnaSequence":
+            atomic_numbers_per_sequence[i][0].insert(0, gemmi.Element("O").atomic_number)
 
     atomic_numbers = [item for sublist1 in atomic_numbers_per_sequence for sublist2 in sublist1 for item in sublist2]
     
@@ -227,19 +317,26 @@ def create_full_element_list(
     return atomic_numbers
 
 def create_atom_mask(
-    sequences: str, regions_of_interest_per_sequence # we need specific chains and full sequences in those chains!
+    sequences: str, regions_of_interest_per_sequence, sequence_types: list[str] # we need specific chains and full sequences in those chains!
+    # Note that the order of sequences and sequence_types should be matching...!
 ):
     """
     Create the atom mask for the regions of interest given as a list of residue 1-indices per each full sequence. 
     The reason for requiring supplying the full sequence is due to many pdbs (especially in CryoEM) being uncompletely resolved.
     """
     residue_list_per_sequence = [
-        [gemmi.expand_one_letter(one_letter_code, gemmi.ResidueKind.AA) for one_letter_code in sequence]
-        for sequence in sequences
+        [
+            gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) 
+            for one_letter_code in sequence
+        ]
+        for sequence, sequence_type in zip(sequences, sequence_types)
     ]
     residue_lengths_per_sequence = [
-        [len(AMINO_ACID_ATOMS_ORDER[residue]) for residue in residue_list]
-        for residue_list in residue_list_per_sequence
+        [
+            len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][residue]) 
+            for residue in residue_list
+        ]
+        for residue_list, sequence_type in zip(residue_list_per_sequence, sequence_types)
     ]
     
     masks_per_sequence = [
@@ -253,7 +350,12 @@ def create_atom_mask(
             masks_per_sequence[i][residue_index] = [1,] * residue_lengths_per_sequence[i][residue_index] # supplying the full 1-list as all the atoms in the residue are taken
 
     for i in range(len(sequences)):
-        masks_per_sequence[i][-1] = masks_per_sequence[i][-1] + [0] # for OXT FIXME oxt can also be included, but ain't a big deal.
+        if sequence_types[i] == "proteinChain":
+            masks_per_sequence[i][-1] = masks_per_sequence[i][-1] + [0] # for OXT
+        elif sequence_types[i] == "rnaSequence":
+            masks_per_sequence[i][0] = [0] + masks_per_sequence[i][0] # for OP3
+        elif sequence_types[i] == "dnaSequence":
+            masks_per_sequence[i][0] = [0] + masks_per_sequence[i][0] # for OP3
 
     mask = [elem for sublist1 in masks_per_sequence for sublist2 in sublist1 for elem in sublist2]  # flattening the mask
     
@@ -492,7 +594,10 @@ def get_backbone_ca_mask(pdb_file, device=torch.device("cpu")):
 def query_msa_server(msa_full_save_dir, sequence_dictionary):
     if not os.path.exists(msa_full_save_dir):
         os.makedirs(msa_full_save_dir, exist_ok=True) 
-        sequences = [dictionary["sequence"] for dictionary in sequence_dictionary]
+        # Only protein chain sequences are needed for the MSA
+        sequences = [
+            dictionary["sequence"] for dictionary in sequence_dictionary if dictionary["sequence_type"] == "proteinChain"
+        ] 
         
         # Do paired ONLY if there's more than one unique sequence. 
         try:
@@ -522,18 +627,23 @@ def query_msa_server(msa_full_save_dir, sequence_dictionary):
         os.makedirs(os.path.join(msa_full_save_dir, "msa/"), exist_ok=True)
 
         # Non pairing a3m for each unique sequence!
-        for i in range(len(sequences)):
-            os.makedirs(os.path.join(msa_full_save_dir, f"msa/{i+1}"), exist_ok=True)
+        protein_idx = 0
+        for i in range(len(sequence_dictionary)): 
+            # Saving under the index of the sequence in the sequence dictionary s.t. we can extract the number later on when creating the config
+            # Only if a protein sequence.
+            if sequence_dictionary[i]["sequence_type"] == "proteinChain":
+                os.makedirs(os.path.join(msa_full_save_dir, f"msa/{i+1}"), exist_ok=True)
 
-            # creating a subfolder for each unique sequence
-            with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/non_pairing.a3m'), 'w') as f:
-                f.write(msa_unpaired[i])
-            with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/pairing.a3m'), 'w') as f:
-                # if there are more than one unique sequence, we can do pairing
-                if len(set(sequences)) > 1:
-                    f.write(msa_paired[i])
-                else:
-                    continue
+                # creating a subfolder for each unique sequence
+                with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/non_pairing.a3m'), 'w') as f:
+                    f.write(msa_unpaired[protein_idx])
+                    protein_idx += 1
+                with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/pairing.a3m'), 'w') as f:
+                    # if there are more than one unique sequence, we can do pairing
+                    if len(set(sequences)) > 1:
+                        f.write(msa_paired[i])
+                    else:
+                        continue
 
 def delete_hydrogens(pdb_file):
     # Load the structure
@@ -599,7 +709,7 @@ def remove_headers(pdb_file_path, write_pdb_file_path=None):
         return write_pdb_file_path
 
 def create_backbone_masks(
-        sequences: str, device=torch.device("cpu")
+        sequences: str, device=torch.device("cpu") # NOTE: sequences for backbone can only be protein chains..! Hence this is not needed..!
 ):
     """
     Outputs 3 masks: for N, CA, C atoms in the backbone of the protein sequences.
@@ -971,17 +1081,26 @@ def parse_dihedrals_csv(dihedrals_file, full_sequence, device="cpu"): # for now,
 
     return phi_psi_dphi_dpsi_tensor, phi_psi_mask, chi1_dchi1_tensor, chi1_mask
 
-def alignment_mask_by_chain(sequences, chains_to_align=[0]):
+def alignment_mask_by_chain(sequences, chains_to_align=[0], sequence_types=None):
+    if sequence_types is None:
+        sequence_types = ["proteinChain"] * len(sequences)
+
     residue_lists_per_sequence = [
-        [gemmi.expand_one_letter(one_letter_code, gemmi.ResidueKind.AA) for one_letter_code in sequence]
-        for sequence in sequences
+        [
+            gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) 
+            for one_letter_code in sequence
+        ]
+        for sequence, sequence_type in zip(sequences, sequence_types)
     ]
     residue_lengths_per_sequence = [
-        [len(AMINO_ACID_ATOMS_ORDER[residue]) for residue in residue_list]
-        for residue_list in residue_lists_per_sequence
+        [
+            len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][residue]) 
+            for residue in residue_list
+        ]
+        for residue_list, sequence_type in zip(residue_lists_per_sequence, sequence_types)
     ]
 
-    atomic_lengths_per_sequence = [sum(lengths)+1 for lengths in residue_lengths_per_sequence] # +1 for OXT
+    atomic_lengths_per_sequence = [sum(lengths)+1 for lengths in residue_lengths_per_sequence] # +1 for OXT and OP3
 
     masks_per_sequence = [[0,]*length for length in atomic_lengths_per_sequence]
 

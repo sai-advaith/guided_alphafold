@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--noe_pdb_file', type=str, default=None, help='NOE PDB file path')
     parser.add_argument('--sequences', nargs='+', help='Sequences for each chain')
     parser.add_argument('--counts', nargs='+', type=int, help='Counts for each sequence')
+    parser.add_argument('--sequence_types', nargs='+', help='Sequence types for each chain')
     parser.add_argument('--input_directory', type=str, default='pipeline_inputs', help='Directory where inputs will be loaded (default: pipeline_inputs)')
     parser.add_argument('--output_directory', type=str, default='pipeline_outputs', help='Directory where outputs will be saved (default: pipeline_outputs)')
     parser.add_argument('--wandb_key', type=str, default=None, help='wandb key')
@@ -33,9 +34,11 @@ def main():
 
     assert args.phenix_setup_sh is not None, "Phenix setup shell script must be provided"
     assert len(args.sequences) == len(args.counts), "Sequences and counts must have the same length"
+    assert len(args.sequence_types) == len(args.sequences), "Sequence types and sequences must have the same length"
+    assert all(sequence_type in ["proteinChain", "rnaSequence", "dnaSequence"] for sequence_type in args.sequence_types), "Sequence types must be in [proteinChain, rnaSequence, dnaSequence]!"
 
     # Get the config file
-    em_config_file_path = preprocess_em_inputs(args.pdb_id, args.sequences, args.counts, args.emdb_id, args.renumbered_file_path, args.assembly_identifier, args.input_directory, args.output_directory, args.wandb_key, args.wandb_project, args.dihedrals_file, args.noe_restraints_file, args.noe_pdb_file)
+    em_config_file_path = preprocess_em_inputs(args.pdb_id, args.sequences, args.counts, args.sequence_types, args.emdb_id, args.renumbered_file_path, args.assembly_identifier, args.input_directory, args.output_directory, args.wandb_key, args.wandb_project, args.dihedrals_file, args.noe_restraints_file, args.noe_pdb_file)
 
     # Loading the config file and merging it with the arguments
     config = load_config(em_config_file_path)

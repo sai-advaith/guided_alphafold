@@ -73,7 +73,17 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         full_sequences = [item for sublist in full_sequences for item in sublist]
         self.full_sequences = full_sequences 
         self.sequences_dictionary = sequences_dictionary
-        self.masks_per_sequence = [alignment_mask_by_chain(full_sequences, [sequence_id]).to(device) for sequence_id, sequence in enumerate(full_sequences)]
+
+        self.sequence_types = [
+            sequence_type
+            for dictionary in sequences_dictionary
+            for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
+        ]
+
+        self.masks_per_sequence = [
+            alignment_mask_by_chain(full_sequences, [sequence_id], self.sequence_types).to(device) 
+            for sequence_id, sequence in enumerate(full_sequences)
+        ]
         self.mask_indices_per_sequence = [
             torch.nonzero(mask, as_tuple=True)[0] for mask in self.masks_per_sequence
         ]
@@ -163,7 +173,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         self.evaluate_only_resolved = evaluate_only_resolved 
         self.chains_to_read = chains_to_read 
         self.should_align_to_chains = should_align_to_chains # which chains to align to if the protein is symmetric (eigenvectors)
-        self.align_to_chain_mask = alignment_mask_by_chain(full_sequences, chains_to_align=should_align_to_chains).to(device)
+        self.align_to_chain_mask = alignment_mask_by_chain(full_sequences, chains_to_align=should_align_to_chains, sequence_types=self.sequence_types).to(device)
         self.reapply_b_factor = reapply_b_factor # if True, the b factor is reapplied to the coordinates of the ground truth structure. If False, it is not applied
         self.reapply_is_learnable = reapply_is_learnable # whether the reapply b factor is learnable or not. If True, it is optimized during training
         self.combinatorially_best_alignment = combinatorially_best_alignment
@@ -188,7 +198,8 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
                 chains_to_read=chains_to_read,
                 return_elements=True,
                 return_bfacs=True,
-                return_mask=True
+                return_mask=True,
+                sequence_types=self.sequence_types
             ) # the index is such that all the atoms get read!
         self.bfactor_gt_untouched = self.bfactor_gt.clone()
 
@@ -262,7 +273,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         if full_sequences is not None and regions_of_interest is not None: 
             self.full_sequences = full_sequences
             self.regions_of_interest = regions_of_interest
-            self.regions_of_interest_mask = create_atom_mask(full_sequences, regions_of_interest).to(device) # this is the mask of the atoms that are in the regions of interest
+            self.regions_of_interest_mask = create_atom_mask(full_sequences, regions_of_interest, sequence_types=self.sequence_types).to(device) # this is the mask of the atoms that are in the regions of interest
 
         # 2) ROI density mask (of the D**3 volume) 
         for_zone_of_interest = self.calculate_ESP(
@@ -394,7 +405,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         self.reordering_counter = reordering_every-1
         self.reordering_every = reordering_every-1 # how often to reorder the multimer alignment
 
-        self.backbone_masks = create_backbone_masks(self.full_sequences, device=self.device)
+        self.backbone_masks = create_backbone_masks([sequence for sequence, sequence_type in zip(self.full_sequences, self.sequence_types) if sequence_type == "proteinChain"], device=self.device)
 
         if self.sinkhorn_parameters["guide_multimer_by_chains"] is not False:
             self._initialize_interpolant_backbone_points_per_sequence()
@@ -1440,6 +1451,15 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         self.sinkhorn_parameters["counter"] += 1 # increment the counter for the sink
         #mask_for_OT = torch.ones_like(self.AF3_to_pdb_mask, device=self.device, dtype=torch.bool)
         mask_for_OT = self.AF3_to_pdb_mask
+
+        if self.sinkhorn_parameters["debug_with_rmsd"]:
+            rmsd_loss = (   
+                (
+                    aligned_x_0_hat[:, self.AF3_to_pdb_mask, :] - 
+                    self.coordinates_gt[self.AF3_to_pdb_mask, :].unsqueeze(0)
+                ).square().sum(dim=-1)
+            ).mean().sqrt()
+            return rmsd_loss
 
         if not self.sinkhorn_parameters["guide_multimer_by_chains"]:
             X = aligned_x_0_hat[:, mask_for_OT, :].reshape(-1, 3) 
