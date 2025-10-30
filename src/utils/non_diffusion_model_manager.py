@@ -6,7 +6,7 @@ from ..protenix.config import parse_configs
 from ..protenix.data.infer_data_pipeline import get_inference_dataloader
 from ..runner.inference import InferenceRunner
 from ..protenix.utils.torch_utils import to_device
-from .io import AMINO_ACID_ATOMS_ORDER, ATOM_NAME_TO_ELEMENT, create_atom_mask
+from .io import AMINO_ACID_ATOMS_ORDER, ATOM_NAME_TO_ELEMENT, create_atom_mask, SEQUENCE_TYPE_TO_ATOM_DICTIONARY, SEQUENCE_TYPE_TO_RESIDUE_KIND
 from ..protenix.data.utils import save_structure_cif
 from tqdm import tqdm
 import os 
@@ -123,12 +123,18 @@ class ProtenixModelManager:
         self.full_sequences = [item for sublist in self.full_sequences for item in sublist]
         self.chains_to_read = chains_to_read
         self.ROI_residues = ROI_residues
+        self.sequence_types = [
+            sequence_type
+            for dictionary in sequences_dictionary
+            for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
+        ]
 
         if self.pdb_contains_missing_atoms:
             self.reference_atom_locations, self.resolved_pdb_to_full_mask = load_pdb_atom_locations_full(
                 reference_pdb, 
                 full_sequences = self.full_sequences,
                 chains_to_read=chains_to_read,
+                sequence_types=self.sequence_types,
             )
             self.resolved_pdb_to_full_mask = self.resolved_pdb_to_full_mask.to(device)
         else:
@@ -137,7 +143,7 @@ class ProtenixModelManager:
 
         # TODO: Advaith
         if self.ROI_residues is not None:
-            self.ROI_atom_mask = create_atom_mask(self.full_sequences, ROI_residues).to(device)
+            self.ROI_atom_mask = create_atom_mask(self.full_sequences, ROI_residues, sequence_types=self.sequence_types).to(device)
         else: 
             self.ROI_atom_mask = torch.zeros_like(self.resolved_pdb_to_full_mask, dtype=torch.bool, device=self.reference_atom_locations.device)
 
@@ -198,19 +204,22 @@ class ProtenixModelManager:
             {
                 "sequences": [
                     {
-                        "proteinChain": {
+                        sequence_dict["sequence_type"]: {
                             "sequence": sequence_dict["sequence"],
                             "count": sequence_dict["count"],
-                            "msa": {
-                                "precomputed_msa_dir": f"{self.msa_save_dir}/msa/{i+1}", # each unique protein sequence has a corresponding msa folder!
-                                "pairing_db": "uniref100"
-                            }
+                            **({
+                                "msa": {
+                                    "precomputed_msa_dir": f"{self.msa_save_dir}/msa/{i+1}",
+                                    "pairing_db": "uniref100"
+                                }
+                            } if sequence_dict["sequence_type"] == "proteinChain" else {}),
+                            "modifications": []
                         }
                     }
-                    for i, sequence_dict in enumerate(self.sequences_dictionary) # FIXME we should also add support for DNA/RNA and non-protein lignads here..! (but that's a long-term plan for sure)
+                    for i, sequence_dict in enumerate(self.sequences_dictionary) 
                 ],
                 "modelSeeds": [],
-                "assembly_id": "1" if self.assembly_identifier is None else self.assembly_identifier,
+                "assembly_id": "1" if getattr(self, "assembly_identifier", None) is None else self.assembly_identifier,
                 "name": self.pdb_id
             }
             
@@ -517,7 +526,7 @@ class ProtenixModelManager:
         gemmi_structure.write_pdb(write_file_name)
 
 
-def save_structure_full(structure, full_sequences, atom_array, write_file_name, bfactors=None, atom_mask=None):
+def save_structure_full(structure, full_sequences, sequence_types, atom_array, write_file_name, bfactors=None, atom_mask=None):
     
     gemmi_structure = gemmi.Structure()
     model = gemmi.Model("1") 
@@ -529,19 +538,34 @@ def save_structure_full(structure, full_sequences, atom_array, write_file_name, 
 
     for i in range(len(full_sequences)):
         chains.append(gemmi.Chain(chr(ord("A") + i))) # either just chain A, or chain A,B,C etc. depending on the aligomeric state..!s
+        # TODO: Add the name of the chains to have 1-1 correspondence between the pdb and the chains in the structure 
 
     iter_index = 0
     
     structure = structure.cpu().detach().numpy()
-    for chain_i, chain in enumerate(chains): 
+    for chain_i, (chain, sequence_type) in enumerate(zip(chains, sequence_types)): 
         sequence = full_sequences[chain_i]
         for i, res_name_one_letter in enumerate(sequence): # creating the residue
             res = gemmi.Residue()
-            res.name =  gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.AA) 
+            res.name =  gemmi.expand_one_letter(res_name_one_letter, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) 
             res.seqid = gemmi.SeqId(i + 1, " ")
             residue_has_atoms = False  # Track if this residue has any atoms
             
-            for atom_name in AMINO_ACID_ATOMS_ORDER[res.name]: # appending all the atoms in the residue    
+            # Every first residue of a dna or rna chain should have the OP3 atom
+            if sequence_type in ["rnaSequence", "dnaSequence"] and i == 0:
+                if atom_mask[iter_index] == True:
+                    atom = gemmi.Atom()
+                    atom.name = "OP3"
+                    atom.element = gemmi.Element("O")
+                    atom.pos = gemmi.Position(*structure[iter_index])
+                    if bfactors is not None:
+                        atom.b_iso = bfactors[iter_index]
+                    res.add_atom(atom)
+                    residue_has_atoms = True
+                    iter_index += 1
+
+            
+            for atom_name in SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][res.name]: # appending all the atoms in the residue    
                 if atom_mask[iter_index] == True:
                     # Save this atom - it's resolved in the structure
                     atom = gemmi.Atom()
@@ -558,7 +582,7 @@ def save_structure_full(structure, full_sequences, atom_array, write_file_name, 
                 iter_index += 1
             
             # Handle OXT atom for the last residue of each chain
-            if i == len(sequence) - 1:  # Last residue in chain
+            if i == len(sequence) - 1 and sequence_type == "proteinChain":  # Last residue in chain
                 if iter_index < len(atom_mask):
                     if atom_mask[iter_index] == True:
                         atom = gemmi.Atom()

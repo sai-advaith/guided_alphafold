@@ -258,7 +258,7 @@ class ExperimentManager:
             )
             for i in range(structures.shape[0]):
                 save_structure_full(
-                    structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
+                    structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.sequence_types, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
                     bfactors=esp_loss_function_obj.bfactor_gt
                 )
         elif "nmr" in self.config.loss_function.loss_function_type:

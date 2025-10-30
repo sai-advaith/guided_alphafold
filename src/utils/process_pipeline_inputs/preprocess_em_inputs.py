@@ -69,7 +69,7 @@ def fetch_map(emdb_id, pdb_id, root):
     return map_file_name
 
 
-def create_em_configuration_file_from_baseline(pdb_id, sequences, counts, emdb_id, renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, reference_baseline, dihedrals_file=None, noe_restraints_file=None, noe_pdb_file=None):
+def create_em_configuration_file_from_baseline(pdb_id, sequences, counts, sequence_types, emdb_id, renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, reference_baseline, dihedrals_file=None, noe_restraints_file=None, noe_pdb_file=None):
     configurations_folder = "generated_configurations"
     os.makedirs(configurations_folder, exist_ok=True)
 
@@ -85,7 +85,7 @@ def create_em_configuration_file_from_baseline(pdb_id, sequences, counts, emdb_i
     sequences_list, total_chains = [], 0
     for i in range(len(sequences)):
         total_chains += counts[i]
-        sequences_list.append({"count": counts[i], "sequence": sequences[i]})
+        sequences_list.append({"count": counts[i], "sequence": sequences[i], "sequence_type": sequence_types[i]}) # sequence_type is proteinChain, rnaSequence, dnaSequence
 
     # Protein parameters (update other hyperparameters in base yaml file)
     config["protein"]["sequences"] = sequences_list[:]
@@ -143,11 +143,11 @@ def create_em_configuration_file_from_baseline(pdb_id, sequences, counts, emdb_i
     
     return guided_config_file_path
 
-def save_metadata(pdb_id, assembly_identifier, sequences, counts, root):
+def save_metadata(pdb_id, assembly_identifier, sequences, counts, sequence_types, root):
     metadata_dir = os.path.join(root, "metadata", f"{pdb_id.lower()}")
     metadata_file_path = os.path.join(metadata_dir, f"{pdb_id.lower()}.json")
 
-    metadata = {"pdb_id": pdb_id, "seq": sequences, "count": counts, "assembly_identifier": assembly_identifier}
+    metadata = {"pdb_id": pdb_id, "seq": sequences, "count": counts, "assembly_identifier": assembly_identifier, "sequence_types": sequence_types}
 
     # Create dir
     os.makedirs(metadata_dir, exist_ok=True)
@@ -156,7 +156,7 @@ def save_metadata(pdb_id, assembly_identifier, sequences, counts, root):
     with open(metadata_file_path, 'w') as outfile:
         json.dump(metadata, outfile, indent=4)
 
-def main(pdb_id, sequences, counts, emdb_id, renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, dihedrals_file=None, noe_restraints_file=None, noe_pdb_file=None):
+def main(pdb_id, sequences, counts, sequence_types, emdb_id, renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, dihedrals_file=None, noe_restraints_file=None, noe_pdb_file=None):
     # Fetch the pdb file from rcsb
     fetch_pdb(pdb_id, input_directory)
     fetch_map(emdb_id, pdb_id, input_directory)
@@ -166,8 +166,8 @@ def main(pdb_id, sequences, counts, emdb_id, renumbered_file_path, assembly_iden
     new_renumbered_file_path = os.path.join(input_directory, "pdbs", pdb_id, os.path.basename(renumbered_file_path))
 
     # Save metadata
-    save_metadata(pdb_id, assembly_identifier, sequences, counts, input_directory)
+    save_metadata(pdb_id, assembly_identifier, sequences, counts, sequence_types, input_directory)
 
     # Create the config file using template esp file
-    config_file_path = create_em_configuration_file_from_baseline(pdb_id, sequences, counts, emdb_id, new_renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, reference_baseline="pipeline_configurations/cryo_baseline.yaml", dihedrals_file=dihedrals_file, noe_restraints_file=noe_restraints_file, noe_pdb_file=noe_pdb_file)
+    config_file_path = create_em_configuration_file_from_baseline(pdb_id, sequences, counts, sequence_types, emdb_id, new_renumbered_file_path, assembly_identifier, input_directory, output_directory, wandb_key, wandb_project, reference_baseline="pipeline_configurations/cryo_baseline.yaml", dihedrals_file=dihedrals_file, noe_restraints_file=noe_restraints_file, noe_pdb_file=noe_pdb_file)
     return config_file_path
