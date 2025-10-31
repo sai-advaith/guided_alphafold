@@ -14,6 +14,7 @@ from copy import deepcopy
 from biotite.structure.io.pdb import PDBFile
 import pandas as pd
 import math
+from Bio import Align
 
 AMINO_ACID_ATOMS_ORDER = {
     "ALA": ["N", "CA", "C", "O", "CB"],
@@ -140,30 +141,34 @@ def filter_in_residue_bfactor(bfactor, residue_mask):
 
 def load_pdb_atom_locations_full(
         pdb_file, 
-        full_sequences, 
-        chains_to_read=None, 
-        return_bfacs=False, 
-        return_mask=True, 
-        return_elements=False,
-        sequence_types=None, 
+        full_sequences_dict, 
+        chains_to_read: list[str] | None=None, 
+        return_bfacs: bool = False, 
+        return_mask: bool = True, 
+        return_elements: bool = False,
 ):
     """
     "sequence_types" is a list of strings, each string being one of the following: "proteinChain", "rnaSequence", "dnaSequence".
     If empty, all the sequences are assumed to be protein chains.
     """
-    if sequence_types is None:
+
+    # 0. Preparing full sequences and other lists to renumber and reorder the chains to match the fasta input
+    full_sequences = [[dictionary["sequence"],]*dictionary["count"] for dictionary in full_sequences_dict]
+    full_sequences = [item for sublist in full_sequences for item in sublist]
+    
+    if "sequence_type" not in full_sequences_dict[0]:
         sequence_types = ["proteinChain"] * len(full_sequences)
+    else: 
+        sequence_types = [dictionary["sequence_type"]*dictionary["count"] for dictionary in full_sequences_dict]
+        sequence_types = [item for sublist in sequence_types for item in sublist]
 
-    # 0. Importing structures
+    if "maps_to" not in full_sequences_dict[0]:
+        fasta_to_resolved = None
+    else:
+        fasta_to_resolved = {fasta_seq_idx: dictionary["maps_to"]  for fasta_seq_idx, dictionary in enumerate(full_sequences_dict)}
+
+    # 0.5 Reading and cleaning the structures
     structure = gemmi.read_structure(pdb_file) 
-
-    # 0..: Restructuring the case of just one sequence (old implementations)
-    if isinstance(full_sequences, str):
-        chains_to_read = [0,]
-        full_sequences = [full_sequences,] 
-
-    if chains_to_read is None:
-        chains_to_read = list(range(len(full_sequences)))
     
     # 1.0 Cleaning if needed
     try: # hydrogens are being removed regardless.
@@ -172,7 +177,34 @@ def load_pdb_atom_locations_full(
     except:
         print("Hydrogens or ligands failed to be removed. Continuing without removing them..!")
 
-    # 3. Instantiating the positions and masked depending on the oligomeric state of the protein! We are still going from the fact that the sequence is an oligomer
+    # 1.0 Preparing the chains to be reordered
+    if isinstance(full_sequences, str):
+        chains_to_read = [structure[0][0].name,] # always the first/the only chain by default
+        full_sequences = [full_sequences,] 
+
+    if chains_to_read is None:
+        chains_to_read = [chain.name for chain in structure[0]] # all the chain names
+
+    # 2.0 Renumbering the chains and all the other corresponding arrays to match the fasta input
+    sequences_dict = {
+        sequence: count for sequence, count in zip(
+            [dictionary["sequence"] for dictionary in full_sequences_dict], 
+            [dictionary["count"] for dictionary in full_sequences_dict]
+        ) 
+    }
+    chains = [structure[0][chain_name] for chain_name in chains_to_read]
+    chains, resolved_pdb_read_order = renumber_residue_numbers_of_chains_to_match_fasta(
+        chain_list=chains, 
+        fasta_sequences=sequences_dict, 
+        fasta_to_resolved=fasta_to_resolved
+    )
+
+    # 2.5 Renumbering the remaining arrays to match the found pdb order 
+    full_sequences = [full_sequences[i] for i in resolved_pdb_read_order]
+    sequence_types = [sequence_types[i] for i in resolved_pdb_read_order]
+
+    # 3. Given the reordered + renumbered chains and the full sequences [accordingly reordered], 
+    # prepare the correct reading process! [initialize all the appropraite arrays]
     mask = [ 
         [
             [[0]] * len(SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][ gemmi.expand_one_letter(one_letter_code, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) ]) 
@@ -203,19 +235,8 @@ def load_pdb_atom_locations_full(
     if return_elements: # and for elements too..!
         elements = deepcopy(mask) 
 
-    # Preparing the chains 
-    # First reading all the chains in the first model
-    chains = [chain for chain in structure[0]]
-    # Then reordering them by name in the alphabetic order
-    reordering_indices = np.argsort([chain.name for chain in chains])
-    chains = [
-        chains[sorted_i] for sorted_i in reordering_indices
-    ] 
-    #sequence_types_reordered = [sequence_types[chain_i] for chain_i in reordering_indices]
-    # Then only working with the chains that are in the chains_to_read list [assumed alphabetical order]
-    chains = [structure[0][chain_i] for chain_i in chains_to_read] # we always take the first model, and the according chains of the first model!
 
-    # 4. Carefully running the reading cycle
+    # 4. Carefully running the reading cycle given the correct sequences and all the correct residue mappings!
     for chain_i, chain in enumerate(chains):
         for residue_i, residue in enumerate(chain): 
             residue_index_in_pdb = residue.seqid.num - 1 # converting from the pdb 1-index to the proper 0-index (we go from the assimption that all the )
@@ -224,7 +245,7 @@ def load_pdb_atom_locations_full(
             if residue_index_in_pdb >= len(full_sequences[chain_i]):
                 continue
 
-            for atom_i, atom in enumerate(residue):
+            for atom_i, atom in enumerate(residue): 
                 # Finding the correct index of the resolved pdb in the full sequence array. 
                 # DNA and proteinChain have special positions for the last and first and the last atom respectively. These should be taken care of. 
                 if sequence_types[chain_i] == "proteinChain" and atom.name == "OXT":
@@ -236,6 +257,7 @@ def load_pdb_atom_locations_full(
                 else:
                     # If no special position -> we should be able to find the index in the regular way
                     atom_index_in_pdb = SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_types[chain_i]][residue.name].index(atom.name)
+                    # TODO: redo the OP3 behaviour since it will call the mistake if it was resolved. 
                 
                 atom_positions_full_perresidue[chain_i][residue_index_in_pdb][atom_index_in_pdb] = (atom.pos.x, atom.pos.y, atom.pos.z)
                 mask[chain_i][residue_index_in_pdb][atom_index_in_pdb] = [1]
@@ -451,6 +473,146 @@ def get_non_missing_atom_mask(pdb, atom_array):
             atom_mask.append(False)
             atom_array_index += 1
 
+
+def find_fasta_to_resolved_correspondence(
+    fasta_sequences: dict[str, int], 
+    resolved_sequences: list[str],
+    aligner: Align.PairwiseAligner | None = None
+):
+    if aligner is None:
+        aligner = Align.PairwiseAligner(
+            mode='local',
+            open_gap_score=-20.0,  # Increased penalty!
+            extend_gap_score=-0.5
+        )
+
+    alignment_score_matrix = np.zeros((len(resolved_sequences), len(fasta_sequences)))
+    for i, resolved_sequence in enumerate(resolved_sequences):
+        for j, fasta_sequence in enumerate(fasta_sequences.keys()):
+            alignment = aligner.align(resolved_sequence, fasta_sequence)
+            alignment_score_matrix[i, j] = alignment.score
+
+    # Getting the best alignments for each fasta sequence depending on how many are expected [multiplicities]
+    fasta_to_resolved = {
+        fasta_idx: np.argsort(alignment_score_matrix[:, fasta_idx]) [ -fasta_sequences[fasta_seq]: ] 
+        for fasta_idx, fasta_seq in enumerate(fasta_sequences.keys())
+    }
+    # Checking that all the resolved sequences are accounted for and are unique.
+    assert (
+            np.sort(np.concatenate(
+                list(fasta_to_resolved.values())
+            )) == \
+            np.arange(len(resolved_sequences))
+        ).all(), \
+        "Automatic alignment of resolved sequences to fasta sequences failed to find unique valid mappings. Please check the sequences and try again, or consider manually aligning the sequences via giving the chain. "
+
+    return fasta_to_resolved
+
+def find_starting__zero_indeces_of_alignment(
+    fasta_sequences: dict[str, int], # Fasta sequences should be wrapped as dicts to know the multiplicities
+    resolved_sequences: list[str],
+    aligner: Align.PairwiseAligner | None = None,
+    fasta_to_resolved: list[list[str]] | None = None,
+):
+    if aligner is None:
+        aligner = Align.PairwiseAligner(
+            mode='local',
+            open_gap_score=-20.0,  # Increased penalty!
+            extend_gap_score=-0.5
+        )
+
+    ## If the correspondence indices of fasta -> resolved are not provided, we fall back to the automatic alignment
+    ## And check that the correspondence is valid
+    #if fasta_to_resolved is None:
+    #    fasta_to_resolved = find_fasta_to_resolved_correspondence(fasta_sequences, resolved_sequences, aligner)
+    #else: 
+    #    assert len(fasta_to_resolved) == len(fasta_sequences), "The number of fasta sequences and the number of fasta to resolved indices must match."
+    #    assert all(len(indices) == fasta_sequences[fasta_seq] for indices, fasta_seq in zip(fasta_to_resolved, fasta_sequences.keys())), "The number of resolved sequences for each fasta sequence must match the multiplicity of the fasta sequence."
+    #    assert all(np.sort(np.concatenate(fasta_to_resolved)) == np.arange(len(resolved_sequences))).all(), "The provided correspondence between the fasta and resolved sequences is not valid (not a bijection)."
+
+    # Inverting the bijective mapping to be from resolved to fasta indices.
+    resolved_to_fasta_dict = {
+        resolved_sequence_idx: corresponding_fasta_idx 
+        for resolved_sequence_idx, corresponding_fasta_idx in fasta_to_resolved.items()
+    }
+    resolved_to_fasta_dict = { # Sorting the dictionary so that keys are in the ascending order [i.e., alphabetical chains]
+        resolved_sequence_idx: resolved_to_fasta_dict[resolved_sequence_idx] 
+        for resolved_sequence_idx in sorted(resolved_to_fasta_dict.keys())
+    }
+
+    # Forming alignment to find the starting indices
+    starting_zero_indices = np.zeros(len(resolved_sequences), dtype=np.int64) 
+    for resolved_sequence_idx, corresponding_fasta_idx in resolved_to_fasta_dict.items():
+        alignment = aligner.align(
+            resolved_sequences[resolved_sequence_idx], 
+            fasta_sequences[corresponding_fasta_idx]
+        )
+        starting_zero_indices[resolved_sequence_idx] = alignment.coordinates[1,0]
+        # Tells you where the resolved sequence starts in the fasta file [from which residue / letter]
+    return starting_zero_indices # are 0-indices, not 1-indices.
+
+
+def renumber_chains_by_starting_indices(
+    chains: list[gemmi.Chain], 
+    starting_one_indices: list[int]
+):
+    for chain_idx, (chain, starting_index) in enumerate(zip(chains, starting_one_indices)):
+        current_resolved_1_index = chain[0].seqid.num
+        corresponding_fasta_1_index = starting_index
+        # the 1-index of the first residue in the chain should match the corresponding 1-index in the fasta sequence.
+        delta = corresponding_fasta_1_index - current_resolved_1_index
+        for residue in chain: 
+            residue.seqid.num = residue.seqid.num + delta
+        
+        return chain
+
+
+# TODO: finish this function tomorrow.
+def renumber_residue_numbers_of_chains_to_match_fasta(
+    chain_list: list[gemmi.Chain], 
+    fasta_sequences: dict[str, int],
+    fasta_to_resolved: list[list[int]] | None = None,
+    aligner: Align.PairwiseAligner | None = None, 
+):
+    chain_names = [chain.name for chain in chain_list]
+    resolved_sequences = [
+        gemmi.one_letter_code([res.name for res in chain]) 
+        for chain in chain_list
+    ]
+
+    if fasta_to_resolved is None:
+        # Falling back to automatic match making between fasta and resolved sequences
+        # Includes the check of validity of such mappings.
+        fasta_to_resolved: dict[str, list[int]] = find_fasta_to_resolved_correspondence(fasta_sequences, resolved_sequences, aligner)
+        fasta_to_resolved: dict[str, list[str]] = {
+            fasta_seq: [chain_names[idx] for idx in indices]
+            for fasta_seq, indices in fasta_to_resolved.items()
+        }
+    else:
+        # Taking the provided correspondence between fasta and resolved sequences
+        assert set(list(np.concatenate(list(fasta_to_resolved.values())))) == \
+            set(chain_names), "The provided correspondence between the fasta and resolved sequences is not valid (not a bijection)."
+        # Checking that the number of the resolved sequences is matching the number of the fasta sequences together with the correspondences
+        # plus that all the numbers are present! 
+
+    # Finding where the resolved sequences start in the fasta sequences
+    starting_zero_indices = find_starting__zero_indeces_of_alignment(
+        fasta_sequences, resolved_sequences, aligner, fasta_to_resolved
+    )
+
+    # The order of chains in the pdb file such that they would match the AF3's output defined by the fasta sequences.
+    resolved_pdb_read_order = list(np.concatenate(list(fasta_to_resolved.values())))
+
+    # Reordering all the chains and the corresponding arrays such that the pdb will be read in the correct order 
+    # to match the AF3's output defined by the input fasta sequences.
+    chains_reordered = [chain_list[idx] for idx in resolved_pdb_read_order]
+    chain_names_reordered = [chain.name for chain in chains_reordered]
+    starting_one_indices_reordered = starting_zero_indices[resolved_pdb_read_order] + 1 # converting to 1-indices
+
+    chains_with_residues_renumbered = renumber_chains_by_starting_indices(chains_reordered, starting_one_indices_reordered)
+
+    return chains_with_residues_renumbered, resolved_pdb_read_order
+    
 
 
 def get_atom_mask(pdb_file, residue_indices):
