@@ -132,9 +132,8 @@ class ProtenixModelManager:
         if self.pdb_contains_missing_atoms:
             self.reference_atom_locations, self.resolved_pdb_to_full_mask = load_pdb_atom_locations_full(
                 reference_pdb, 
-                full_sequences = self.full_sequences,
+                full_sequences_dict=self.sequences_dictionary,
                 chains_to_read=chains_to_read,
-                sequence_types=self.sequence_types,
             )
             self.resolved_pdb_to_full_mask = self.resolved_pdb_to_full_mask.to(device)
         else:

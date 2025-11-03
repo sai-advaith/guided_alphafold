@@ -194,12 +194,11 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         self.coordinates_gt, _, self.bfactor_gt, self.element_gt = \
             load_pdb_atom_locations_full(
                 pdb_file=reference_pdb, 
-                full_sequences=full_sequences,
+                full_sequences_dict=sequences_dictionary,
                 chains_to_read=chains_to_read,
                 return_elements=True,
                 return_bfacs=True,
                 return_mask=True,
-                sequence_types=self.sequence_types
             ) # the index is such that all the atoms get read!
         self.bfactor_gt_untouched = self.bfactor_gt.clone()
 
