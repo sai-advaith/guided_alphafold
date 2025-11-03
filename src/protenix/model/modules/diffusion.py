@@ -28,6 +28,8 @@ from ...model.utils import expand_at_dim
 from ...openfold_local.model.primitives import LayerNorm
 from ...openfold_local.utils.checkpointing import get_checkpoint_fn
 
+import torch.utils.checkpoint as checkpoint
+
 
 class DiffusionConditioning(nn.Module):
     """
@@ -107,40 +109,72 @@ class DiffusionConditioning(nn.Module):
                 - s (torch.Tensor): [..., N_sample, N_tokens, c_s]
                 - z (torch.Tensor): [..., N_tokens, N_tokens, c_z]
         """
+        
         # Pair conditioning
-        pair_z = torch.cat(
-            tensors=[z_trunk, self.relpe(input_feature_dict)], dim=-1
-        )  # [..., N_tokens, N_tokens, 2*c_z]
-        pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
+        
         if inplace_safe:
+            pair_z = torch.cat(
+                tensors=[z_trunk, self.relpe(input_feature_dict)], dim=-1
+            )  # [..., N_tokens, N_tokens, 2*c_z]
+            pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
             pair_z += self.transition_z1(pair_z)
             pair_z += self.transition_z2(pair_z)
         else:
-            pair_z = pair_z + self.transition_z1(pair_z)
-            pair_z = pair_z + self.transition_z2(pair_z)
+            def transition_block(z_trunk):
+                """Transition block for pair embeddings."""
+                pair_z = torch.cat(
+                    tensors=[z_trunk, self.relpe(input_feature_dict)], dim=-1
+                )  # [..., N_tokens, N_tokens, 2*c_z]
+                pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
+                pair_z = pair_z + self.transition_z1(pair_z)
+                pair_z = pair_z + self.transition_z2(pair_z)
+                return pair_z
+            pair_z = checkpoint.checkpoint(
+                transition_block, z_trunk
+            )  # [..., N_tokens, N_tokens, c_z]
+        
+        
         # Single conditioning
-        single_s = torch.cat(
-            tensors=[s_trunk, s_inputs], dim=-1
-        )  # [..., N_tokens, c_s + c_s_inputs]
-        single_s = self.linear_no_bias_s(self.layernorm_s(single_s))
-        noise_n = self.fourier_embedding(
-            t_hat_noise_level=torch.log(input=t_hat_noise_level / self.sigma_data) / 4
-        ).to(
-            single_s.dtype
-        )  # [..., N_sample, c_in]
-        single_s = single_s.unsqueeze(dim=-3) + self.linear_no_bias_n(
-            self.layernorm_n(noise_n)
-        ).unsqueeze(
-            dim=-2
-        )  # [..., N_sample, N_tokens, c_s]
+        
         if inplace_safe:
+            single_s = torch.cat(
+                tensors=[s_trunk, s_inputs], dim=-1
+            )  # [..., N_tokens, c_s + c_s_inputs]
+            single_s = self.linear_no_bias_s(self.layernorm_s(single_s))
+            noise_n = self.fourier_embedding(
+                t_hat_noise_level=torch.log(input=t_hat_noise_level / self.sigma_data) / 4
+            ).to(
+                single_s.dtype
+            )  # [..., N_sample, c_in]
+            single_s = single_s.unsqueeze(dim=-3) + self.linear_no_bias_n(
+                self.layernorm_n(noise_n)
+            ).unsqueeze(
+                dim=-2
+            )  # [..., N_sample, N_tokens, c_s]
+
             single_s += self.transition_s1(single_s)
             single_s += self.transition_s2(single_s)
         else:
-            single_s = single_s + self.transition_s1(single_s)
-            single_s = single_s + self.transition_s2(single_s)
+            def single_block(s_trunk, s_inputs):
+                single_s = torch.cat([s_trunk, s_inputs], dim=-1)
+                single_s = self.linear_no_bias_s(self.layernorm_s(single_s))
+                noise_n = self.fourier_embedding(
+                    t_hat_noise_level=torch.log(t_hat_noise_level / self.sigma_data) / 4
+                ).to(single_s.dtype)
+                single_s = single_s.unsqueeze(-3) + self.linear_no_bias_n(
+                    self.layernorm_n(noise_n)
+                ).unsqueeze(-2)
+                single_s = single_s + self.transition_s1(single_s)
+                single_s = single_s + self.transition_s2(single_s)
+                return single_s
+            
+            single_s = checkpoint.checkpoint(single_block, s_trunk, s_inputs)
+        
+        
         if not self.training and pair_z.shape[-2] > 2000:
             torch.cuda.empty_cache()
+
+
         return single_s, pair_z
 
 
