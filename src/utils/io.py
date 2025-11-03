@@ -159,7 +159,7 @@ def load_pdb_atom_locations_full(
     if "sequence_type" not in full_sequences_dict[0]:
         sequence_types = ["proteinChain"] * len(full_sequences)
     else: 
-        sequence_types = [dictionary["sequence_type"]*dictionary["count"] for dictionary in full_sequences_dict]
+        sequence_types = [[dictionary["sequence_type"],]*dictionary["count"] for dictionary in full_sequences_dict]
         sequence_types = [item for sublist in sequence_types for item in sublist]
 
     if "maps_to" not in full_sequences_dict[0]:
@@ -193,15 +193,15 @@ def load_pdb_atom_locations_full(
         ) 
     }
     chains = [structure[0][chain_name] for chain_name in chains_to_read]
-    chains, resolved_pdb_read_order = renumber_residue_numbers_of_chains_to_match_fasta(
+    chains, resolved_pdb_read_order_letters, resolved_pdb_order_indices = renumber_residue_numbers_of_chains_to_match_fasta(
         chain_list=chains, 
         fasta_sequences=sequences_dict, 
         fasta_to_resolved=fasta_to_resolved
     )
 
     # 2.5 Renumbering the remaining arrays to match the found pdb order 
-    full_sequences = [full_sequences[i] for i in resolved_pdb_read_order]
-    sequence_types = [sequence_types[i] for i in resolved_pdb_read_order]
+    #full_sequences = [full_sequences[i] for i in resolved_pdb_order_indices]
+    #sequence_types = [sequence_types[i] for i in resolved_pdb_order_indices] # NOTE: they should probably NOT be reordered. they were actually correct. we reordered the chains s.t. these things match?? 
 
     # 3. Given the reordered + renumbered chains and the full sequences [accordingly reordered], 
     # prepare the correct reading process! [initialize all the appropraite arrays]
@@ -240,7 +240,7 @@ def load_pdb_atom_locations_full(
     for chain_i, chain in enumerate(chains):
         for residue_i, residue in enumerate(chain): 
             residue_index_in_pdb = residue.seqid.num - 1 # converting from the pdb 1-index to the proper 0-index (we go from the assimption that all the )
-            if residue_index_in_pdb < 0:
+            if residue_index_in_pdb < 0: # TODO: rethink this logic. maybe that's not what we want to do with the new changes. 
                 continue # Do not include residues with negative indices. 
             if residue_index_in_pdb >= len(full_sequences[chain_i]):
                 continue
@@ -508,7 +508,7 @@ def find_fasta_to_resolved_correspondence(
 
     return fasta_to_resolved
 
-def find_starting__zero_indeces_of_alignment(
+def find_starting_zero_indeces_of_alignment(
     fasta_sequences: dict[str, int], # Fasta sequences should be wrapped as dicts to know the multiplicities
     resolved_sequences: list[str],
     aligner: Align.PairwiseAligner | None = None,
@@ -521,21 +521,14 @@ def find_starting__zero_indeces_of_alignment(
             extend_gap_score=-0.5
         )
 
-    ## If the correspondence indices of fasta -> resolved are not provided, we fall back to the automatic alignment
-    ## And check that the correspondence is valid
-    #if fasta_to_resolved is None:
-    #    fasta_to_resolved = find_fasta_to_resolved_correspondence(fasta_sequences, resolved_sequences, aligner)
-    #else: 
-    #    assert len(fasta_to_resolved) == len(fasta_sequences), "The number of fasta sequences and the number of fasta to resolved indices must match."
-    #    assert all(len(indices) == fasta_sequences[fasta_seq] for indices, fasta_seq in zip(fasta_to_resolved, fasta_sequences.keys())), "The number of resolved sequences for each fasta sequence must match the multiplicity of the fasta sequence."
-    #    assert all(np.sort(np.concatenate(fasta_to_resolved)) == np.arange(len(resolved_sequences))).all(), "The provided correspondence between the fasta and resolved sequences is not valid (not a bijection)."
-
     # Inverting the bijective mapping to be from resolved to fasta indices.
-    resolved_to_fasta_dict = {
-        resolved_sequence_idx: corresponding_fasta_idx 
-        for resolved_sequence_idx, corresponding_fasta_idx in fasta_to_resolved.items()
-    }
-    resolved_to_fasta_dict = { # Sorting the dictionary so that keys are in the ascending order [i.e., alphabetical chains]
+    resolved_to_fasta_dict = {}
+    for corresponding_fasta_idx, resolved_sequence_indices in fasta_to_resolved.items():
+        for resolved_sequence_idx in resolved_sequence_indices:
+            resolved_to_fasta_dict[resolved_sequence_idx] = corresponding_fasta_idx
+    
+    # Sorting the dictionary so that keys are in the ascending order [i.e., alphabetical chains]
+    resolved_to_fasta_dict = { 
         resolved_sequence_idx: resolved_to_fasta_dict[resolved_sequence_idx] 
         for resolved_sequence_idx in sorted(resolved_to_fasta_dict.keys())
     }
@@ -545,9 +538,9 @@ def find_starting__zero_indeces_of_alignment(
     for resolved_sequence_idx, corresponding_fasta_idx in resolved_to_fasta_dict.items():
         alignment = aligner.align(
             resolved_sequences[resolved_sequence_idx], 
-            fasta_sequences[corresponding_fasta_idx]
+            list(fasta_sequences.keys())[corresponding_fasta_idx]
         )
-        starting_zero_indices[resolved_sequence_idx] = alignment.coordinates[1,0]
+        starting_zero_indices[resolved_sequence_idx] = alignment[0].coordinates[1,0]
         # Tells you where the resolved sequence starts in the fasta file [from which residue / letter]
     return starting_zero_indices # are 0-indices, not 1-indices.
 
@@ -556,6 +549,7 @@ def renumber_chains_by_starting_indices(
     chains: list[gemmi.Chain], 
     starting_one_indices: list[int]
 ):
+    chains_renumbered = []
     for chain_idx, (chain, starting_index) in enumerate(zip(chains, starting_one_indices)):
         current_resolved_1_index = chain[0].seqid.num
         corresponding_fasta_1_index = starting_index
@@ -564,10 +558,11 @@ def renumber_chains_by_starting_indices(
         for residue in chain: 
             residue.seqid.num = residue.seqid.num + delta
         
-        return chain
+        chains_renumbered.append(chain)
+
+    return chains_renumbered
 
 
-# TODO: finish this function tomorrow.
 def renumber_residue_numbers_of_chains_to_match_fasta(
     chain_list: list[gemmi.Chain], 
     fasta_sequences: dict[str, int],
@@ -575,6 +570,7 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
     aligner: Align.PairwiseAligner | None = None, 
 ):
     chain_names = [chain.name for chain in chain_list]
+    chain_names_to_int = {chain_name: idx for idx, chain_name in enumerate(chain_names)}
     resolved_sequences = [
         gemmi.one_letter_code([res.name for res in chain]) 
         for chain in chain_list
@@ -583,35 +579,41 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
     if fasta_to_resolved is None:
         # Falling back to automatic match making between fasta and resolved sequences
         # Includes the check of validity of such mappings.
-        fasta_to_resolved: dict[str, list[int]] = find_fasta_to_resolved_correspondence(fasta_sequences, resolved_sequences, aligner)
+        fasta_to_resolved_int: dict[str, list[int]] = find_fasta_to_resolved_correspondence(fasta_sequences, resolved_sequences, aligner)
         fasta_to_resolved: dict[str, list[str]] = {
             fasta_seq: [chain_names[idx] for idx in indices]
-            for fasta_seq, indices in fasta_to_resolved.items()
+            for fasta_seq, indices in fasta_to_resolved_int.items()
         }
     else:
         # Taking the provided correspondence between fasta and resolved sequences
         assert set(list(np.concatenate(list(fasta_to_resolved.values())))) == \
             set(chain_names), "The provided correspondence between the fasta and resolved sequences is not valid (not a bijection)."
+        fasta_to_resolved_int = {
+            fasta_idx: [chain_names_to_int[chain_name] for chain_name in chain_names] 
+            for fasta_idx, chain_names in fasta_to_resolved.items()
+        }
         # Checking that the number of the resolved sequences is matching the number of the fasta sequences together with the correspondences
         # plus that all the numbers are present! 
 
     # Finding where the resolved sequences start in the fasta sequences
-    starting_zero_indices = find_starting__zero_indeces_of_alignment(
-        fasta_sequences, resolved_sequences, aligner, fasta_to_resolved
+    starting_zero_indices = find_starting_zero_indeces_of_alignment(
+        fasta_sequences, resolved_sequences, aligner, fasta_to_resolved_int
     )
 
     # The order of chains in the pdb file such that they would match the AF3's output defined by the fasta sequences.
-    resolved_pdb_read_order = list(np.concatenate(list(fasta_to_resolved.values())))
+    resolved_pdb_read_order_letters = list(np.concatenate(list(fasta_to_resolved.values())))
+    resolved_pdb_order_indices = [chain_names_to_int[chain_name] for chain_name in resolved_pdb_read_order_letters]
 
     # Reordering all the chains and the corresponding arrays such that the pdb will be read in the correct order 
     # to match the AF3's output defined by the input fasta sequences.
-    chains_reordered = [chain_list[idx] for idx in resolved_pdb_read_order]
+    # resolved_pdb_read_order contains chain names, not indices. Need to map names to chain objects.
+    chains_reordered = [chain_list[idx] for idx in resolved_pdb_order_indices]
     chain_names_reordered = [chain.name for chain in chains_reordered]
-    starting_one_indices_reordered = starting_zero_indices[resolved_pdb_read_order] + 1 # converting to 1-indices
+    starting_one_indices_reordered = starting_zero_indices[resolved_pdb_order_indices] + 1 # converting to 1-indices
 
     chains_with_residues_renumbered = renumber_chains_by_starting_indices(chains_reordered, starting_one_indices_reordered)
 
-    return chains_with_residues_renumbered, resolved_pdb_read_order
+    return chains_with_residues_renumbered, resolved_pdb_read_order_letters, resolved_pdb_order_indices
     
 
 
@@ -782,7 +784,8 @@ def query_msa_server(msa_full_save_dir, sequence_dictionary):
 
         if len(set(sequences)) > 1:
             msa_paired = run_mmseqs2(
-                sequences, prefix='tmp/', user_agent='sai-advaith/guided_alphafold', use_pairing=True, pairing_strategy="complete" # pairing with the greedy didn't seem to work too nicely..!
+                sequences, prefix='tmp/', user_agent='sai-advaith/guided_alphafold', 
+                use_pairing=True, pairing_strategy="complete", use_env=False # pairing with the greedy didn't seem to work too nicely..!
             )
 
         os.system('rm -r tmp/_env')
@@ -799,13 +802,15 @@ def query_msa_server(msa_full_save_dir, sequence_dictionary):
                 # creating a subfolder for each unique sequence
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/non_pairing.a3m'), 'w') as f:
                     f.write(msa_unpaired[protein_idx])
-                    protein_idx += 1
+                    
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/pairing.a3m'), 'w') as f:
                     # if there are more than one unique sequence, we can do pairing
                     if len(set(sequences)) > 1:
-                        f.write(msa_paired[i])
+                        f.write(msa_paired[protein_idx])
                     else:
                         continue
+
+                protein_idx += 1
 
 def delete_hydrogens(pdb_file):
     # Load the structure
