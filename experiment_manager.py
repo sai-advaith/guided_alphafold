@@ -313,8 +313,8 @@ class ExperimentManager:
                 guidance_direction=guidance_direction, step_size=self.config.diffusion_process.guidance.step_size, 
                 normalize_gradients=normalize_gradients, structures_gradient_norm=structures_gradient_norm, guidance_scale_gradually_increase=self.config.diffusion_process.guidance.guidance_scale_gradually_increase,
             )
-            if self.loss_function is not None:
-                self.loss_function.post_optimization_step()
+            if self.loss_function is not None and self.config.general.apply_diffusion_guidance and i > start_guidance_from:
+                self.loss_function.post_optimization_step() # Perform post-optimization.
             if i < self.config.model_manager.diffusion_N - 1:
                 # structures = self.model_manager.get_x_noisy(structures, i + 1)
                 structures = self.model_manager.get_x_noisy(structures, start_index=start_idx, end_index=end_idx)
