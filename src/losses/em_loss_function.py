@@ -1919,6 +1919,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
                 save_structure_full(
                     structure=structures[i].cpu(),
                     full_sequences=self.full_sequences,
+                    sequence_types=self.sequence_types,
                     atom_array=None,
                     write_file_name=original_path,
                     bfactors=fitted_bfactors.cpu().numpy(),
@@ -2010,6 +2011,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         save_structure_full(
             structure=self.coordinates_gt.cpu(),
             full_sequences=self.full_sequences, # check if sequence reduction is needed
+            sequence_types=self.sequence_types,
             atom_array=None, 
             write_file_name=gt_pdb_path,
             bfactors=bfactors_to_use,
@@ -2060,6 +2062,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
                 save_structure_full( 
                     structure=pdb_structure, 
                     full_sequences=self.full_sequences, 
+                    sequence_types=self.sequence_types,
                     atom_array=None, 
                     write_file_name=full_pdb_path,
                     bfactors=None,  # No B-factors for the full PDB
@@ -2108,6 +2111,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         save_structure_full( 
             structure=pdb_structure, 
             full_sequences=self.full_sequences, 
+            sequence_types=self.sequence_types,
             atom_array=None, 
             write_file_name=f"{evaluation_path}/{os.path.basename(pdb_for_phenix).replace('.pdb', '_rscc_painted.pdb')}",
             bfactors=rscc_tensor.cpu().numpy(),
