@@ -2,8 +2,16 @@ from .abstract_loss_funciton import AbstractLossFunction
 from typing import List, Optional
 import torch.nn.functional as F
 
+
+
 class MultiLossFunction(AbstractLossFunction):
-    def __init__(self, loss_functions: List[AbstractLossFunction], weights: Optional[List[float]] = None, normalize_losses_by_main_loss: bool = False):
+    def __init__(
+        self, 
+        loss_functions: List[AbstractLossFunction], 
+        weights: Optional[List[float]] = None, 
+        normalize_losses_by_main_loss: Optional[bool] = False,
+        loss_labels: Optional[List[str]] = None,
+    ):
         self.loss_functions = loss_functions
         self.weights = weights
         self.normalize_losses_by_main_loss = normalize_losses_by_main_loss
@@ -31,7 +39,7 @@ class MultiLossFunction(AbstractLossFunction):
         if len(losses) > 1:
             if self.normalize_losses_by_main_loss: 
                 loss_sum = loss_sum + sum([
-                    l / l.clone().detach().abs() * main_loss.clone().detach().abs() * w 
+                    l / (l.clone().detach().abs() + 1e-8) * main_loss.clone().detach().abs() * w 
                     for l, w in zip(losses[1:], self.weights[1:]) # Normalizing the losses by bringing them first to the magnitude of the main loss and then scaling by the weight
                 ])
             else:
@@ -46,9 +54,29 @@ class MultiLossFunction(AbstractLossFunction):
         assert len(new_x_0_hats) <= 1
         return loss_sum, losses, new_x_0_hats[0] if len(new_x_0_hats) > 0 else None
     
-    def post_optimization_step(self):
-        for loss_function in self.loss_functions:
-            loss_function.post_optimization_step()
+    def pre_optimization_step(self, x_0_hat, i=None, step=None):
+        # Either only the main loss function can change the x_0_hat or the only one that changed x_0_hat is being chosen.
+        # Mainly used for purposes like concatenation of frozen atoms / inprinting etc.
+        
+        main_loss = self.loss_functions[0] # Assumes the first loss is the main loss
+        new_x_0_hat = main_loss.pre_optimization_step(x_0_hat, i=i, step=step) # Normally just contains new concatenated parts etc.
+        
+        if len(self.loss_functions) > 1:
+            for loss_function in self.loss_functions[1:]:
+                loss_function.pre_optimization_step(new_x_0_hat, i=i, step=step) # Perform other pre-optimizations if there's any.
+        
+        return new_x_0_hat
+    
+    def post_optimization_step(self, x_0_hat):
+        main_loss = self.loss_functions[0]
+        new_x_0_hat = main_loss.post_optimization_step(x_0_hat) 
+        # An important element is removing any concatenated bits. However, some other optimizations like b-factor tuning can be present. 
+
+        if len(self.loss_functions) > 1:
+            for loss_function in self.loss_functions[1:]:
+                loss_function.post_optimization_step(new_x_0_hat) # Perform other post-optimizations if there's any.
+        
+        return new_x_0_hat
     
     def save_state(self, structures, folder_path, **kwargs):
         for loss_function in self.loss_functions:

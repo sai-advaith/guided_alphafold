@@ -15,6 +15,9 @@ from biotite.structure.io.pdb import PDBFile
 import pandas as pd
 import math
 from Bio import Align
+from pykeops.torch import LazyTensor
+import string
+import math
 
 AMINO_ACID_ATOMS_ORDER = {
     "ALA": ["N", "CA", "C", "O", "CB"],
@@ -41,16 +44,57 @@ AMINO_ACID_ATOMS_ORDER = {
     "CSO": ["N", "CA", "C", "O", "CB", "SG", "OD"]
 } # NOTE: OXT is added for the last reisdue. 
 
-DNA_ATOMS_ORDER = {
-
-}
-
 RNA_ATOMS_ORDER = { # "'"" is an important part of convential naming. 
     "A": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
     "U": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
     "G": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
     "C": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+    
+    # adding extra modifications here. For now like this. Later, better readers should be introduced..!
+    # --- U-like Modifications (Use 'U' atoms) ---
+    "PSU": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "H2U": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "5MU": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "3TD": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "4SU": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "OMU": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+    "UR3": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],
+
+    # --- C-like Modifications (Use 'C' atoms) ---
+    "5MC": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+    "OMC": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+    "1MC": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6'],
+
+    # --- A-like Modifications (Use 'A' atoms) ---
+    "1MA": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+    "6MZ": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+    "2MA": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+    "A2M": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+    "I":   ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'N6', 'N1', 'C2', 'N3', 'C4'],
+
+    # --- G-like Modifications (Use 'G' atoms) ---
+    "7MG": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "M2G": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "OMG": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "G7M": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
+    "2MG": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'], # <--- Added here
+    "1MG": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N9', 'C8', 'N7', 'C5', 'C6', 'O6', 'N1', 'C2', 'N2', 'N3', 'C4'],
 } # NOTE: if the first nucleotide, 'OP3' is added. If the last, nothing is added [unlike OXT for proteins]
+
+# DEPRECATED: This mapping is a temporary workaround for handling modified RNA residues during alignment.
+# TODO: Replace with proper residue readers/parsers that can handle modified residues natively.
+# This mapping converts modified RNA residues to their canonical base nucleotides for sequence alignment purposes only.
+# The mapping is based on the atom structure comments in RNA_ATOMS_ORDER above.
+RNA_MODIFIED_TO_CANONICAL = {
+    # U-like Modifications (Use 'U' atoms)
+    "PSU": "U", "H2U": "U", "5MU": "U", "3TD": "U", "4SU": "U", "OMU": "U", "UR3": "U",
+    # C-like Modifications (Use 'C' atoms)
+    "5MC": "C", "OMC": "C", "1MC": "C",
+    # A-like Modifications (Use 'A' atoms)
+    "1MA": "A", "6MZ": "A", "2MA": "A", "A2M": "A", "I": "A",
+    # G-like Modifications (Use 'G' atoms)
+    "7MG": "G", "M2G": "G", "OMG": "G", "G7M": "G", "2MG": "G", "1MG": "G",
+}
 
 DNA_ATOMS_ORDER = {
     "DT": ['P', 'OP1', 'OP2', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C7', 'C6'],
@@ -139,13 +183,123 @@ def filter_in_residue_bfactor(bfactor, residue_mask):
     bfactor[residue_mask] = bfactor_mean
     return bfactor
 
+
+
+def merge_multiple_structures(
+    structures: list[gemmi.Structure], 
+    occupancies: list[float] | None = None,
+) -> gemmi.Structure:
+    """
+    Merges N structures (each containing exactly 1 model) into a single structure 
+    containing 1 model with N altlocs.
+    
+    Args:
+        structures: List of gemmi.Structure objects with identical topology.
+        occupancies: List of weights summing to 1.0. Defaults to equal weights.
+    """
+    
+    # --- 1. Validation ---
+    n_structs = len(structures)
+    
+    if n_structs == 0:
+        raise ValueError("Input list is empty.")
+
+    # Handle defaults
+    if occupancies is None:
+        occupancies = [1.0 / n_structs] * n_structs
+    
+    if len(occupancies) != n_structs:
+        raise ValueError(f"Occupancies length ({len(occupancies)}) must match structures ({n_structs}).")
+
+    # Precision Check: Sum must be ~1.0
+    # Using a small epsilon for floating point comparison
+    total_occ = sum(occupancies)
+    if not math.isclose(total_occ, 1.0, abs_tol=1e-4):
+        raise ValueError(f"Occupancies must sum to 1.0. Current sum: {total_occ}")
+
+    # Altloc tags check
+    available_tags = string.ascii_uppercase + string.digits 
+    if n_structs > len(available_tags):
+        raise ValueError(f"Too many structures (Limit: {len(available_tags)})")
+
+    # --- 2. Construction ---
+    merged_st = gemmi.Structure()
+    
+    # Create the SINGLE output model (named "1")
+    merged_model = gemmi.Model("1")
+    
+    # Extract the FIRST model from every input structure
+    input_models = [s[0] for s in structures]
+
+    # --- 3. Topology Traversal (Strict Zip) ---
+    # Zip Chains
+    for chains_tuple in zip(*input_models):
+        template_chain = chains_tuple[0]
+        new_chain = gemmi.Chain(template_chain.name)
+        
+        # Zip Residues
+        for residues_tuple in zip(*chains_tuple):
+            template_res = residues_tuple[0]
+            
+            new_res = gemmi.Residue()
+            new_res.name = template_res.name
+            new_res.seqid = template_res.seqid
+            new_res.entity_type = template_res.entity_type
+            new_res.segment = template_res.segment
+            
+            # Zip Atoms
+            for atoms_tuple in zip(*residues_tuple):
+                
+                # Iterate through aligned atoms to assign Altlocs
+                for i, source_atom in enumerate(atoms_tuple):
+                    
+                    new_atom = source_atom.clone()
+                    new_atom.altloc = available_tags[i]
+                    new_atom.occ = occupancies[i]
+                    
+                    new_res.add_atom(new_atom)
+            
+            new_chain.add_residue(new_res)
+        
+        merged_model.add_chain(new_chain)
+
+    merged_st.add_model(merged_model)
+    return merged_st
+
+
+def load_pdb_atom_locations_without_gaps(
+    pdb_file, chains_to_read: list[str] | None=None, device: torch.DeviceObjType = torch.device("cpu"),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Simply reads all the available atoms and their atom types. 
+    Does not resolve issues such as missing atoms, missing reisudes, correct order to match AF3 etc.
+    Required for computing EM loss with frozen atoms [assuming those missing atoms are not passed to AF3 -> no such ordering etc. is required..!]
+    Simply outputs tensors containing resolved atoms' positions, atomic numbers, and b-factors.
+    """
+    gemmi_structure = gemmi.read_pdb(pdb_file)
+    if chains_to_read is None:
+        chains_to_read = [chain.name for chain in gemmi_structure[0]]
+    chains = [gemmi_structure[0][chain_name] for chain_name in chains_to_read]
+
+    atom_positions_list = [(atom.pos.x, atom.pos.y, atom.pos.z) for chain in chains for residue in chain for atom in residue]
+    atomic_numbers_list = [atom.element.atomic_number for chain in chains for residue in chain for atom in residue]
+    atomic_numbers_bfactors_list = [atom.b_iso for chain in chains for residue in chain for atom in residue]
+
+    atom_positions_tensor = torch.tensor(atom_positions_list, dtype=torch.float32, device=device)
+    atomic_numbers_tensor = torch.tensor(atomic_numbers_list, dtype=torch.int32, device=device)
+    atomic_numbers_bfactors_tensor = torch.tensor(atomic_numbers_bfactors_list, dtype=torch.float32, device=device)
+    return atom_positions_tensor, atomic_numbers_tensor, atomic_numbers_bfactors_tensor
+
 def load_pdb_atom_locations_full(
         pdb_file, 
         full_sequences_dict, 
         chains_to_read: list[str] | None=None, 
         return_bfacs: bool = False, 
-        return_mask: bool = True, 
+        return_mask: bool = True, # Actually, the mask is always returned since the output is otherwise useless
         return_elements: bool = False,
+        device: torch.DeviceObjType = torch.device("cpu"),
+        output_masks_per_chain: bool = False,
+        return_starting_indices: bool = False,  # If True, also return starting residue indices (1-indexed) for each chain
 ):
     """
     "sequence_types" is a list of strings, each string being one of the following: "proteinChain", "rnaSequence", "dnaSequence".
@@ -193,7 +347,7 @@ def load_pdb_atom_locations_full(
         ) 
     }
     chains = [structure[0][chain_name] for chain_name in chains_to_read]
-    chains, resolved_pdb_read_order_letters, resolved_pdb_order_indices = renumber_residue_numbers_of_chains_to_match_fasta(
+    chains, resolved_pdb_read_order_letters, resolved_pdb_order_indices, starting_one_indices_reordered = renumber_residue_numbers_of_chains_to_match_fasta(
         chain_list=chains, 
         fasta_sequences=sequences_dict, 
         fasta_to_resolved=fasta_to_resolved
@@ -224,11 +378,11 @@ def load_pdb_atom_locations_full(
             mask[i][-1].append([0]) # adding OXT to each last residue in each chain
             atom_positions_full_perresidue[i][-1].append([0,0,0]) 
         elif sequence_types[i] == "rnaSequence":
-            mask[i][0].append([0]) # adding OP3 to each last residue in each chain
-            atom_positions_full_perresidue[i][0].append([0,0,0]) 
+            mask[i][0].insert(0, [0]) # adding OP3 to each first residue in each chain (5' end)
+            atom_positions_full_perresidue[i][0].insert(0, [0,0,0]) 
         elif sequence_types[i] == "dnaSequence":
-            mask[i][0].append([0]) # adding OP3 to each last residue in each chain
-            atom_positions_full_perresidue[i][0].append([0,0,0]) 
+            mask[i][0].insert(0, [0]) # adding OP3 to each first residue in each chain (5' end)
+            atom_positions_full_perresidue[i][0].insert(0, [0,0,0]) 
 
     if return_bfacs: # Doing the same for b-factors..!
         b_factors = deepcopy(mask) 
@@ -240,6 +394,7 @@ def load_pdb_atom_locations_full(
     for chain_i, chain in enumerate(chains):
         for residue_i, residue in enumerate(chain): 
             residue_index_in_pdb = residue.seqid.num - 1 # converting from the pdb 1-index to the proper 0-index (we go from the assimption that all the )
+            
             if residue_index_in_pdb < 0: # TODO: rethink this logic. maybe that's not what we want to do with the new changes. 
                 continue # Do not include residues with negative indices. 
             if residue_index_in_pdb >= len(full_sequences[chain_i]):
@@ -255,9 +410,16 @@ def load_pdb_atom_locations_full(
                 elif sequence_types[chain_i] == "dnaSequence" and atom.name == "OP3": # NOTE TODO: WE DID NOT CHECK HOW THE DNA SEQUENCES LOOK YET!!
                     atom_index_in_pdb = 0
                 else:
-                    # If no special position -> we should be able to find the index in the regular way
-                    atom_index_in_pdb = SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_types[chain_i]][residue.name].index(atom.name)
-                    # TODO: redo the OP3 behaviour since it will call the mistake if it was resolved. 
+                    # If no special position -> we should be able to find the index in the regular way. 
+                    # unless it's a modification. check for modifications here..! 
+                    if atom.name in SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_types[chain_i]][residue.name]:
+                        atom_index_in_pdb = SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_types[chain_i]][residue.name].index(atom.name)
+                        # For RNA/DNA first residue: OP3 was inserted at position 0, so all dictionary indices need +1 offset
+                        if sequence_types[chain_i] in ["rnaSequence", "dnaSequence"] and residue_index_in_pdb == 0:
+                            atom_index_in_pdb += 1
+                    else:
+                        print(f"Warning: Atom {atom.name} is not found in the sequence of the residue {residue.name} of type {sequence_types[chain_i]}. A modification or a bug...?!")
+                        continue 
                 
                 atom_positions_full_perresidue[chain_i][residue_index_in_pdb][atom_index_in_pdb] = (atom.pos.x, atom.pos.y, atom.pos.z)
                 mask[chain_i][residue_index_in_pdb][atom_index_in_pdb] = [1]
@@ -266,8 +428,12 @@ def load_pdb_atom_locations_full(
                     b_factors[chain_i][residue_index_in_pdb][atom_index_in_pdb] = [atom.b_iso] if atom.b_iso is not None else [0.0] # bfactor is actually never zero..? 
                 
 
-    # 5. Flattening out the resulting arrays (NOW 3D instead of 2D arrays) and importing to torch tensors
+    if output_masks_per_chain:
+        return mask
+
+    # 5. Flattening out the resulting arrays (NOW 3D instead of 2D arrays) and importing to torch tensors OR outputting lists per chains. [i.e., not flattening the per chain dimension]
     mask = [elem for sublist1 in mask for sublist2 in sublist1 for elem in sublist2]
+
     atom_positions_full_perresidue = [elem for sublist1 in atom_positions_full_perresidue for sublist2 in sublist1 for elem in sublist2]
     atom_positions_array = np.array(atom_positions_full_perresidue)
     atom_positions_tensor = torch.tensor(atom_positions_array, dtype=torch.float32)
@@ -284,6 +450,14 @@ def load_pdb_atom_locations_full(
         elements = create_full_element_list(full_sequences, sequence_types)
         to_return.append(elements)
 
+    to_return = [item.to(device) for item in to_return] # moving everything to the correct device
+
+    if return_starting_indices:
+        # starting_one_indices_reordered is already in the order matching full_sequences (after reordering)
+        # Convert to list for easier handling
+        starting_indices_list = starting_one_indices_reordered.tolist()
+        return to_return + [starting_indices_list]
+    
     return to_return
 
 def create_full_element_list(
@@ -534,33 +708,84 @@ def find_starting_zero_indeces_of_alignment(
     }
 
     # Forming alignment to find the starting indices
+    # We need both PDB and FASTA alignment starts to handle cases where:
+    # 1. PDB has a prefix (starts later) - PDB alignment start > 0
+    # 2. FASTA is shorter (PDB is longer) - will be handled by bounds checking
     starting_zero_indices = np.zeros(len(resolved_sequences), dtype=np.int64) 
+    pdb_alignment_starts = np.zeros(len(resolved_sequences), dtype=np.int64)  # Where PDB alignment starts
     for resolved_sequence_idx, corresponding_fasta_idx in resolved_to_fasta_dict.items():
         alignment = aligner.align(
             resolved_sequences[resolved_sequence_idx], 
             list(fasta_sequences.keys())[corresponding_fasta_idx]
         )
-        starting_zero_indices[resolved_sequence_idx] = alignment[0].coordinates[1,0]
+        # coordinates[0,0] = where PDB sequence alignment starts (0 if no prefix, >0 if PDB has prefix)
+        # coordinates[1,0] = where FASTA sequence alignment starts (usually 0, but could be >0 if FASTA starts later)
+        pdb_alignment_starts[resolved_sequence_idx] = alignment[0].coordinates[0, 0]
+        starting_zero_indices[resolved_sequence_idx] = alignment[0].coordinates[1, 0]
         # Tells you where the resolved sequence starts in the fasta file [from which residue / letter]
-    return starting_zero_indices # are 0-indices, not 1-indices.
+    return starting_zero_indices, pdb_alignment_starts  # are 0-indices, not 1-indices.
 
 
 def renumber_chains_by_starting_indices(
     chains: list[gemmi.Chain], 
-    starting_one_indices: list[int]
+    starting_one_indices: list[int],
+    pdb_alignment_starts: list[int]  # 0-indexed positions where PDB alignment starts
 ):
+    """
+    Renumber chains to match FASTA sequences.
+    
+    Handles two cases:
+    1. PDB has prefix (pdb_alignment_start > 0): First aligned PDB residue maps to FASTA start.
+       Prefix residues get negative numbers and are skipped.
+    2. FASTA is shorter: Extra PDB residues get numbers beyond FASTA length and are skipped by bounds check.
+    """
     chains_renumbered = []
-    for chain_idx, (chain, starting_index) in enumerate(zip(chains, starting_one_indices)):
+    for chain_idx, (chain, starting_index, pdb_alignment_start) in enumerate(zip(chains, starting_one_indices, pdb_alignment_starts)):
         current_resolved_1_index = chain[0].seqid.num
         corresponding_fasta_1_index = starting_index
-        # the 1-index of the first residue in the chain should match the corresponding 1-index in the fasta sequence.
-        delta = corresponding_fasta_1_index - current_resolved_1_index
+        
+        # Compute delta such that:
+        # - If PDB has prefix (pdb_alignment_start > 0): PDB sequence position pdb_alignment_start maps to FASTA position starting_index
+        # - PDB sequence position 0 (chain[0]) maps to: starting_index - pdb_alignment_start
+        # So: delta = (starting_index - pdb_alignment_start) - current_resolved_1_index
+        # This ensures:
+        #   - PDB seq pos 0 → FASTA pos (starting_index - pdb_alignment_start) [may be negative, will be skipped]
+        #   - PDB seq pos pdb_alignment_start → FASTA pos starting_index [correct alignment]
+        delta = (corresponding_fasta_1_index - pdb_alignment_start) - current_resolved_1_index
+        
         for residue in chain: 
             residue.seqid.num = residue.seqid.num + delta
         
         chains_renumbered.append(chain)
 
     return chains_renumbered
+
+
+def convert_modified_residues_to_canonical_for_alignment(residue_names: list[str]) -> str:
+    """
+    DEPRECATED: Temporary workaround to convert modified RNA residues to canonical nucleotides for alignment.
+    TODO: Replace with proper residue readers/parsers that can handle modified residues natively.
+    
+    Converts modified RNA residues (e.g., 1MG, PSU, 5M) to their canonical base nucleotides
+    (A, G, C, U) for sequence alignment purposes. This is necessary because gemmi.one_letter_code()
+    doesn't handle modified residues properly, causing alignment failures.
+    
+    Args:
+        residue_names: List of 3-letter residue names from PDB
+        
+    Returns:
+        String of one-letter codes with modified residues converted to canonical bases
+    """
+    canonical_residues = []
+    for res_name in residue_names:
+        # Check if it's a modified RNA residue
+        if res_name in RNA_MODIFIED_TO_CANONICAL:
+            canonical_residues.append(RNA_MODIFIED_TO_CANONICAL[res_name])
+        else:
+            # Use gemmi for standard residues (it expects a list and returns a string)
+            one_letter = gemmi.one_letter_code([res_name])
+            canonical_residues.append(one_letter)
+    return ''.join(canonical_residues)
 
 
 def renumber_residue_numbers_of_chains_to_match_fasta(
@@ -571,8 +796,10 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
 ):
     chain_names = [chain.name for chain in chain_list]
     chain_names_to_int = {chain_name: idx for idx, chain_name in enumerate(chain_names)}
+    # DEPRECATED: Using convert_modified_residues_to_canonical_for_alignment as temporary workaround.
+    # TODO: Replace with proper residue readers/parsers that can handle modified residues natively.
     resolved_sequences = [
-        gemmi.one_letter_code([res.name for res in chain]) 
+        convert_modified_residues_to_canonical_for_alignment([res.name for res in chain])
         for chain in chain_list
     ]
 
@@ -586,7 +813,9 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
         }
     else:
         # Taking the provided correspondence between fasta and resolved sequences
-        assert set(list(np.concatenate(list(fasta_to_resolved.values())))) == \
+        values_list = list(fasta_to_resolved.values())
+        concatenated_values = values_list[0] if len(values_list) == 1 else np.concatenate(values_list)
+        assert set(list(concatenated_values)) == \
             set(chain_names), "The provided correspondence between the fasta and resolved sequences is not valid (not a bijection)."
         fasta_to_resolved_int = {
             fasta_idx: [chain_names_to_int[chain_name] for chain_name in chain_names] 
@@ -596,12 +825,13 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
         # plus that all the numbers are present! 
 
     # Finding where the resolved sequences start in the fasta sequences
-    starting_zero_indices = find_starting_zero_indeces_of_alignment(
+    starting_zero_indices, pdb_alignment_starts = find_starting_zero_indeces_of_alignment(
         fasta_sequences, resolved_sequences, aligner, fasta_to_resolved_int
     )
 
     # The order of chains in the pdb file such that they would match the AF3's output defined by the fasta sequences.
-    resolved_pdb_read_order_letters = list(np.concatenate(list(fasta_to_resolved.values())))
+    values_list = list(fasta_to_resolved.values())
+    resolved_pdb_read_order_letters = list(values_list[0] if len(values_list) == 1 else np.concatenate(values_list))
     resolved_pdb_order_indices = [chain_names_to_int[chain_name] for chain_name in resolved_pdb_read_order_letters]
 
     # Reordering all the chains and the corresponding arrays such that the pdb will be read in the correct order 
@@ -610,10 +840,13 @@ def renumber_residue_numbers_of_chains_to_match_fasta(
     chains_reordered = [chain_list[idx] for idx in resolved_pdb_order_indices]
     chain_names_reordered = [chain.name for chain in chains_reordered]
     starting_one_indices_reordered = starting_zero_indices[resolved_pdb_order_indices] + 1 # converting to 1-indices
+    pdb_alignment_starts_reordered = pdb_alignment_starts[resolved_pdb_order_indices]  # Keep as 0-indexed for calculation
 
-    chains_with_residues_renumbered = renumber_chains_by_starting_indices(chains_reordered, starting_one_indices_reordered)
+    chains_with_residues_renumbered = renumber_chains_by_starting_indices(
+        chains_reordered, starting_one_indices_reordered, pdb_alignment_starts_reordered
+    )
 
-    return chains_with_residues_renumbered, resolved_pdb_read_order_letters, resolved_pdb_order_indices
+    return chains_with_residues_renumbered, resolved_pdb_read_order_letters, resolved_pdb_order_indices, starting_one_indices_reordered
     
 
 
@@ -1278,19 +1511,29 @@ def alignment_mask_by_chain(sequences, chains_to_align=[0], sequence_types=None)
     mask = torch.tensor(mask, dtype=torch.bool).flatten()
     return mask
 
-def create_cc_bfactor_tensor(chain_data, full_sequences):
+def create_cc_bfactor_tensor(chain_data, full_sequences, sequence_types=None):
     """
     Create B-factor tensor from CC values with proper atom ordering.
     Handles chain reordering: log might have B,A,C but we need A,B,C order for sequences.
     Also handles residue numbering offset (log might start at 448, not 1).
+    Supports protein, RNA, and DNA sequences.
     
     Args:
         chain_data (dict): Dictionary from parse_phenix_cc_log (chains might be in any order)
-        full_sequences (list): List of full protein sequences (in A,B,C,... order)
+        full_sequences (list): List of full sequences (in A,B,C,... order)
+        sequence_types (list, optional): List of sequence types matching full_sequences.
+                                       Each should be "proteinChain", "rnaSequence", or "dnaSequence".
+                                       If None, assumes all are protein chains.
         
     Returns:
-        torch.Tensor: B-factor tensor with CC values, same length as total atoms including OXT
+        torch.Tensor: B-factor tensor with CC values, same length as total atoms including OXT/OP3
     """
+    import torch
+    
+    # Default to all protein chains if sequence_types not provided
+    if sequence_types is None:
+        sequence_types = ["proteinChain"] * len(full_sequences)
+    
     # Create CC lookup by chain and residue number
     cc_lookup = {}
     residue_number_ranges = {}
@@ -1305,26 +1548,26 @@ def create_cc_bfactor_tensor(chain_data, full_sequences):
     
     # Get the actual chains present in the log (e.g., ['A', 'B', 'C'])
     available_chains = sorted(chain_data.keys())
-    #print(f"Available chains in log: {available_chains}")
     
     # Show residue number ranges for each chain
     for chain_id in available_chains:
         start, end = residue_number_ranges[chain_id]
-        #print(f"Chain {chain_id}: residue numbers {start} to {end}")
     
     bfactor_list = []
     
     # Process sequences in A,B,C order, but map to available chains
     for seq_idx in range(len(full_sequences)):
         sequence = full_sequences[seq_idx]
+        sequence_type = sequence_types[seq_idx] if seq_idx < len(sequence_types) else "proteinChain"
+        
+        # Get the appropriate atom dictionary for this sequence type
+        atom_dict = SEQUENCE_TYPE_TO_ATOM_DICTIONARY.get(sequence_type, AMINO_ACID_ATOMS_ORDER)
         
         # Map sequence index to actual chain letter from log
         if seq_idx < len(available_chains):
             actual_chain_letter = available_chains[seq_idx]
             start_res_num = residue_number_ranges[actual_chain_letter][0]
-            #print(f"Mapping sequence {seq_idx} (target chain {chr(ord('A') + seq_idx)}) to log chain {actual_chain_letter}, starting at residue {start_res_num}")
         else:
-            #print(f"Warning: Sequence {seq_idx} has no corresponding chain in log")
             actual_chain_letter = None
             start_res_num = 1
         
@@ -1338,16 +1581,37 @@ def create_cc_bfactor_tensor(chain_data, full_sequences):
             else:
                 cc_value = 0.0
             
-            # Get the 3-letter residue name
-            res_name_three_letter = gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.AA)
+            # Get the 3-letter residue name based on sequence type
+            if sequence_type == "proteinChain":
+                res_name_three_letter = gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.AA)
+            elif sequence_type == "rnaSequence":
+                res_name_three_letter = gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.RNA)
+            elif sequence_type == "dnaSequence":
+                res_name_three_letter = gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.DNA)
+            else:
+                # Fallback to protein
+                res_name_three_letter = gemmi.expand_one_letter(res_name_one_letter, gemmi.ResidueKind.AA)
             
-            # Add CC value for all atoms in this residue
-            num_atoms = len(AMINO_ACID_ATOMS_ORDER[res_name_three_letter])
+            # Get number of atoms for this residue, with fallback for non-standard residues
+            if res_name_three_letter in atom_dict:
+                num_atoms = len(atom_dict[res_name_three_letter])
+            else:
+                # Fallback: use a default number of atoms for non-standard residues
+                # Most amino acids have 4-11 atoms, use a safe default
+                print(f"Warning: Residue {res_name_three_letter} not found in atom dictionary, using default atom count")
+                num_atoms = 5  # Safe default (N, CA, C, O, CB for most amino acids)
+            
+            # Match exact order from save_structure_full:
+            # 1. OP3 atom for first RNA/DNA residue (added BEFORE regular atoms)
+            if sequence_type in ["rnaSequence", "dnaSequence"] and residue_idx == 0:
+                bfactor_list.append(cc_value)  # OP3 atom for first residue
+            
+            # 2. Regular atoms from dictionary
             bfactor_list.extend([cc_value] * num_atoms)
             
-            # Add CC value for OXT atom if this is the last residue
-            if residue_idx == len(sequence) - 1:
-                bfactor_list.append(cc_value)
+            # 3. OXT atom for last protein residue (added AFTER regular atoms)
+            if residue_idx == len(sequence) - 1 and sequence_type == "proteinChain":
+                bfactor_list.append(cc_value)  # OXT atom
     
     bfactor_tensor = torch.tensor(bfactor_list, dtype=torch.float32)
     print(f"Created tensor with {len(bfactor_tensor)} values, range: {bfactor_tensor.min():.4f} - {bfactor_tensor.max():.4f}")

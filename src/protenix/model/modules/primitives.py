@@ -351,9 +351,17 @@ def optimized_concat_split(attn_bias: torch.Tensor, n_queries: int) -> torch.Ten
     E = attn_bias.size(-1)
     assert D % n_queries == 0
     num_splits = D // n_queries
-    reshaped = attn_bias.reshape(*attn_bias.shape[:-2], num_splits, n_queries, E)
-    permuted = reshaped.permute(*range(reshaped.dim() - 3), -2, -3, -1)
-    output = permuted.reshape(*attn_bias.shape[:-2], n_queries, num_splits * E)
+    batch_shape = attn_bias.shape[:-2]
+    
+    # Memory-optimized version: chain operations to reduce peak memory
+    # First reshape: [..., D, E] -> [..., num_splits, n_queries, E]
+    reshaped = attn_bias.view(*batch_shape, num_splits, n_queries, E)
+    
+    # Permute: [..., num_splits, n_queries, E] -> [..., n_queries, num_splits, E]
+    # Using contiguous() to avoid creating a view that requires copy during final reshape
+    permute_dims = list(range(len(batch_shape))) + [len(batch_shape) + 1, len(batch_shape), len(batch_shape) + 2]
+    output = reshaped.permute(*permute_dims).contiguous().view(*batch_shape, n_queries, num_splits * E)
+    
     return output
 
 
@@ -423,10 +431,20 @@ def rearrange_to_dense_trunk(
     else:
         attn_bias = F.pad(attn_bias, (pad_left, pad_right, 0, q_pad_length), value=-inf)
 
+    # Clear fragmented memory before heavy operation
+    if q.is_cuda:
+        torch.cuda.empty_cache()
+    
     concat_split_data = optimized_concat_split(attn_bias, n_queries)
+    # Store shape before deleting attn_bias
+    attn_bias_width = attn_bias.shape[-1]
+    del attn_bias  # Free memory immediately
+    
     attn_bias_trunked = concat_split_data.unfold(
-        -1, n_keys, attn_bias.shape[-1] + n_queries
+        -1, n_keys, attn_bias_width + n_queries
     ).transpose(-2, -3)
+    del concat_split_data  # Free memory immediately
+    
     return q_trunked, kv_trunked[0], kv_trunked[1], attn_bias_trunked, q_pad_length
 
 

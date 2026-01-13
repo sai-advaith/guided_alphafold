@@ -11,7 +11,7 @@ class PhenixManager:
 
     def run_shell_command(self, command: str, cwd: str = None) -> str:
         full_cmd = f"source {self.phenix_setup_sh} && {command}"
-        result =  subprocess.run(
+        result = subprocess.run(
             ["/bin/bash", "-c", full_cmd],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -207,5 +207,37 @@ class PhenixManager:
         return self.run_shell_command(shell_command)
 
     def phenix_map_model_cc(self, pdb_path, map_path, resolution, output_file_name_prefix):
+        # Validate input files exist before running
+        if not os.path.exists(pdb_path):
+            raise FileNotFoundError(f"PDB file not found: {pdb_path}")
+        if not os.path.exists(map_path):
+            raise FileNotFoundError(f"Map file not found: {map_path}")
+        
+        # Check file sizes (empty files can cause crashes)
+        if os.path.getsize(pdb_path) == 0:
+            raise ValueError(f"PDB file is empty: {pdb_path}")
+        if os.path.getsize(map_path) == 0:
+            raise ValueError(f"Map file is empty: {map_path}")
+        
         shell_command = f"phenix.map_model_cc {pdb_path} {map_path} resolution={resolution} scattering_table=n_gaussian per_residue=True output.file_name_prefix={output_file_name_prefix}"
         return self.run_shell_command(shell_command)
+    
+    def phenix_map_comparison(self, map_file_1, map_file_2, cwd=None):
+        """
+        Run phenix.map_comparison on two map files.
+        Note: phenix.map_comparison returns exit code 1 even on success, so we handle this specially.
+        """
+        shell_command = f"phenix.map_comparison {map_file_1} {map_file_2}"
+        full_cmd = f"source {self.phenix_setup_sh} && {shell_command}"
+        result = subprocess.run(
+            ["/bin/bash", "-c", full_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            text=True,
+            check=False  # Don't raise on non-zero exit code
+        )
+        # phenix.map_comparison returns exit code 1 even on success, so we check for valid output
+        if result.returncode != 0 and "CC, input maps:" not in result.stdout:
+            raise RuntimeError(f"phenix.map_comparison failed:\n{result.stdout}")
+        return result.stdout

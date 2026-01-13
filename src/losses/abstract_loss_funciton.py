@@ -11,8 +11,11 @@ class AbstractLossFunction:
     def __call__(self, x_0_hat, time, structures=None, i=None):
         pass
     
-    def post_optimization_step(self):
-        pass
+    def post_optimization_step(self, x_0_hat):
+        return x_0_hat
+        
+    def pre_optimization_step(self, x_0_hat, i=None, step=None):
+        return x_0_hat
 
     def save_state(self, structures, folder_path, **kwargs):
         pass

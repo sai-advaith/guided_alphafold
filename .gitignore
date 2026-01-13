@@ -217,6 +217,10 @@ nmr_pipeline_outputs/*
 xray_pipeline_outputs/*
 cryo_pipeline_outputs/*
 
+# PyTorch memory snapshots
+*.pickle
+memory_snapshot.pickle
+
 em_pipeline_inputs/*
 nmr_pipeline_inputs/*
 xray_pipeline_inputs/*
@@ -225,3 +229,4 @@ cryo_pipeline_inputs/*
 vova_em_QoL
 tmp
 pipeline_configurations/cryoem_test_configs/*
+*.png

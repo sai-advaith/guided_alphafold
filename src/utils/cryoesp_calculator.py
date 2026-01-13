@@ -63,19 +63,25 @@ def compute_elden_no_cycle_keops(
 
     N = atom_positions.shape[0]; D3 = lattice.shape[0]; Kparam = 5 
 
-    atom_identities = atom_identities.repeat(B, 1) 
+    atom_identities = atom_identities.repeat(B, 1)  # [B, N] if input was [N], or [B, N] if input was already [B, N]
     b_factors = b_factors.repeat(B, 1) # repeat the b factors for all the batches
 
     # preparing the LazyTensors
     lattice_i = LazyTensor(lattice[:, None, :]) # Shape (D**3, 1, 3), where D = square slice lattice side length
     atom_positions_j = LazyTensor(
         atom_positions[None, :, :]
-    ) # Shape (1, N, 3), where N = number of atoms
+    ) # Shape (1, N, 3), where N = number of atoms (B*N_original after flattening)
     D_ij = ((lattice_i - atom_positions_j) ** 2).sum(dim=2, keepdim=True)  # Shape (D**2, N). 
 
     scattering_attributes = ScatteringAttributes(device) 
-    gaussian_amplitudes, gaussian_widths = scattering_attributes(atom_identities) # a_jk and b_jk respectively, Shape (N, Kparam)
-    gaussian_widths = 1 / (gaussian_widths + b_factors.unsqueeze(-1)) 
+    # Flatten atom_identities to 1D [B*N] for proper indexing - scattering_attributes expects 1D or will handle 2D incorrectly
+    atom_identities_flat = atom_identities.flatten()  # [B*N] - ensures proper indexing
+    gaussian_amplitudes, gaussian_widths = scattering_attributes(atom_identities_flat) # Returns [Kparam, B*N], transpose to [B*N, Kparam]
+    # Transpose from [Kparam, B*N] to [B*N, Kparam] to match expected shape
+    if gaussian_amplitudes.shape[0] == Kparam:
+        gaussian_amplitudes = gaussian_amplitudes.T  # [B*N, Kparam]
+        gaussian_widths = gaussian_widths.T  # [B*N, Kparam]
+    gaussian_widths = 1 / (gaussian_widths + b_factors.flatten().unsqueeze(-1))  # [B*N, Kparam]
     a_jk = LazyTensor(gaussian_amplitudes.view(1, N, Kparam)); b_jk = LazyTensor(gaussian_widths.view(1, N, Kparam)) # Shape (1, N, Kparam) to ensure D_ij can be broadcasted
 
     vol = (

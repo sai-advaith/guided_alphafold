@@ -57,6 +57,9 @@ def fft_upsample_3d(volume: torch.Tensor, out_shape):
     if any(m < n for m, n in zip(out_shape, volume.shape)):
         raise ValueError("All target sizes must be ≥ the input sizes.")
 
+    if out_shape[0] == volume.shape[0]:
+        return volume
+
     # forward FFT → centre the zero–frequency component
     vol_f = torch.fft.fftn(volume)
     vol_f = torch.fft.fftshift(vol_f)

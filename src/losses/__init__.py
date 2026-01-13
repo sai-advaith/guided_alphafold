@@ -6,3 +6,4 @@ from .violation_loss_function import ViolationLossFunction
 from .bond_length_loss_function import BondLengthLossFunction
 from .relax_times_loss_function import RelaxTimesLossFunction
 from .em_loss_function import CryoEM_ESP_GuidanceLossFunction
+from .rmsd_loss_function import RMSDLossFunction

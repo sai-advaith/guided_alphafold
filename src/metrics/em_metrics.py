@@ -216,6 +216,7 @@ def run_em_metrics(config_file_path, guided_model, phenix_env_path, rmax=None):
             "t_init_box_edge_voxels": cryoesp_config.gradient_ascent_parameters.t_init_box_edge_voxels,
         },
         evaluate_only_resolved=getattr(cryoesp_config, 'evaluate_only_resolved', False),
+        per_chain_b_factors=getattr(cryoesp_config, "per_chain_b_factors", None),
     )
 
     print("CryoESP loss function initialized successfully!")
@@ -236,19 +237,42 @@ def run_em_metrics(config_file_path, guided_model, phenix_env_path, rmax=None):
     # Point CryoESP save_folder to the chosen output folder
     cryoesp_loss_function.save_folder = output_folder
     phenix_manager = PhenixManager(phenix_env_path)
+    # Get B-factor fitting parameters from config (with defaults)
+    bfactor_fitting_config = getattr(cryoesp_config, "bfactor_fitting", None)
+    if bfactor_fitting_config is not None:
+        b_factor_lr = getattr(bfactor_fitting_config, "b_factor_lr", 2.0)
+        n_iterations = getattr(bfactor_fitting_config, "n_iterations", 500)
+        bfactor_min = getattr(bfactor_fitting_config, "bfactor_min", 10.0)
+        bfactor_max = getattr(bfactor_fitting_config, "bfactor_max", 800.0)
+        use_cross_correlation = getattr(bfactor_fitting_config, "use_cross_correlation", True)
+        bfactor_regularization = getattr(bfactor_fitting_config, "bfactor_regularization", 0.0)
+        use_zero_b_values = getattr(bfactor_fitting_config, "use_zero_b_values", False)
+        should_always_fit_gt = getattr(bfactor_fitting_config, "should_always_fit_gt", False)
+    else:
+        # Fallback to defaults if bfactor_fitting section is missing
+        b_factor_lr = 2.0
+        n_iterations = 500
+        bfactor_min = 10.0
+        bfactor_max = 800.0
+        use_cross_correlation = True
+        bfactor_regularization = 0.0
+        use_zero_b_values = False
+        should_always_fit_gt = False
+    
     cryoesp_loss_function.save_state(
         structures,
         output_folder,
         phenix_manager,
         skip_png=True,
-        b_factor_lr=2.0,
-        use_zero_b_values=False,
-        should_always_fit_gt=False,
-        n_iterations=800,
-        bfactor_min=10.0,  # Custom B-factor range
-        bfactor_max=800.0,
-        use_cross_correlation=True,
-        bfactor_regularization=0.0,
+        b_factor_lr=b_factor_lr,
+        use_zero_b_values=use_zero_b_values,
+        should_always_fit_gt=should_always_fit_gt,
+        n_iterations=n_iterations,
+        bfactor_min=bfactor_min,
+        bfactor_max=bfactor_max,
+        use_cross_correlation=use_cross_correlation,
+        bfactor_regularization=bfactor_regularization,
+        gt_bfactor_mode=getattr(cryoesp_config, "gt_bfactor_mode", "leave_pdb"),
     )
     print(f"✓ Evaluation completed! Results in: {output_folder}")
 
