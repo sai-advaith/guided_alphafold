@@ -452,6 +452,7 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
 
         # SCALE THE VOLUME IF NEEDED
         if reduced_D != self.D and reduced_D is not None:
+            original_D = self.D
             self.D_mininimal = 2 * self.D / emdb_resolution / self.pixel_size
             if reduced_D < self.D_mininimal:
                 raise ValueError(f"Reduced D {reduced_D} is smaller than the minimal possible D {self.D_mininimal} for the given resolution {emdb_resolution} and pixel size {self.pixel_size}.")
@@ -459,10 +460,15 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
             self.D = reduced_D # (for now 180)
             self.pixel_size = self.pixel_size_full * (self.D_full / self.D) 
 
-            self.fo = fft_downsample_3d(self.fo, (self.D,)*3) 
-            self.fo_unthresholded = fft_downsample_3d(self.fo_unthresholded, (self.D,)*3) 
-            
-            self.fo_threshold_mask = fft_downsample_3d(self.fo_threshold_mask, (self.D,)*3)
+            if self.D < original_D:
+                self.fo = fft_downsample_3d(self.fo, (self.D,)*3)
+                self.fo_unthresholded = fft_downsample_3d(self.fo_unthresholded, (self.D,)*3)
+                self.fo_threshold_mask = fft_downsample_3d(self.fo_threshold_mask.to(self.fo.dtype), (self.D,)*3)
+            else:
+                # Upsample when the requested grid is larger than the input map.
+                self.fo = fft_upsample_3d(self.fo, (self.D,)*3)
+                self.fo_unthresholded = fft_upsample_3d(self.fo_unthresholded, (self.D,)*3)
+                self.fo_threshold_mask = fft_upsample_3d(self.fo_threshold_mask.to(self.fo.dtype), (self.D,)*3)
             self.fo_threshold_mask = torch.where(self.fo_threshold_mask < 0.5, 0.0, 1.0).to(torch.bool)
 
         # PREPARING THE GRIDS
@@ -1892,7 +1898,6 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
         
 
         # 1. ALIGNMENT: aligning the region depending on ROI. Additionally, the alignment finds the best permutations per sequence 
-        
         aligned_x_0_hat, R, T = self.align_structure(
             x_0_hat, self.coordinates_gt.unsqueeze(0),  i=i, step=step, use_saved_alignment=False, structures=structures, time=time
         ) 
@@ -5001,15 +5006,6 @@ class CryoEM_ESP_GuidanceLossFunction(AbstractLossFunction):
 
 
 # Other guidance/loss functions to be implemented.
-
-class CryoEM_ImageAverage_GuidanceLossFunction(AbstractLossFunction):
-    def __init__():
-        raise NotImplementedError("This loss function is not implemented yet.")
-
-class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
-    def __init__():
-        raise NotImplementedError("This loss function is not implemented yet.")
-    
         
 def all_groupwise_permutations(sequence_counts):
     """

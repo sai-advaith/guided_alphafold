@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import shutil
+import sys
 import warnings
 from pathlib import Path
 from urllib.error import URLError
@@ -11,6 +12,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import torch
+import yaml
 
 try:
     from tqdm import tqdm
@@ -19,10 +21,14 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.utils.io import load_pdb_atom_locations_full
 
 try:
     from cryoforward.atom_stack import AtomStack
-    from cryoforward.cryoesp_calculator import compute_volume_over_insertable_matrices
+    from cryoforward.cryoesp_calculator import compute_volume_over_insertable_matrices, setup_fast_esp_solver
     from cryoforward.lattice import Lattice
     from cryoforward.utils.rigid_transform import Rotation
 except ImportError as exc:
@@ -65,6 +71,15 @@ def _parse_args() -> argparse.Namespace:
         dest="pdb_ids",
         default=[],
         help="PDB ID to download (repeatable, e.g. 7T54).",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Optional pipeline YAML to use AF3-style sequences. "
+            "If set, unresolved atoms are masked out to match guidance."
+        ),
     )
     parser.add_argument(
         "--num-rotations",
@@ -116,6 +131,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         dest="collapse_projection_axis",
         help="Use a full 3D lattice and sum along the projection axis.",
+    )
+    parser.add_argument(
+        "--use-fast-solver",
+        action="store_true",
+        default=True,
+        help="Use cryoforward's fast solver (matches guidance loss).",
+    )
+    parser.add_argument(
+        "--slow-solver",
+        action="store_false",
+        dest="use_fast_solver",
+        help="Use the reference slow solver (compute_volume_over_insertable_matrices).",
     )
     parser.add_argument(
         "--atom-batch-size",
@@ -329,44 +356,124 @@ def _render_projection(
     atom_batch_size: int,
     center: torch.Tensor | None = None,
     rotation: Rotation | None = None,
+    *,
+    use_fast_solver: bool,
+    fast_solver=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if rotation is None:
         rotation = Rotation.random(batch=1, device=atom_stack.device)
 
-    rotated_stack = atom_stack.rotate(rotation, center=center, copy=True)
+    if use_fast_solver:
+        if fast_solver is None:
+            raise ValueError("fast_solver must be provided when use_fast_solver=True")
+        _, compute_batch_from_coords = fast_solver
 
-    with torch.no_grad():
-        volume = compute_volume_over_insertable_matrices(
-            atom_stack=rotated_stack,
-            lattice=lattice,
-            B=atom_batch_size,
-            per_voxel_averaging=True,
-            subvolume_mask_in_indices=None,
-            use_checkpointing=False,
-            verbose=False,
-        )
-        if collapse_projection_axis:
+        coords = atom_stack.atom_coordinates
+        if center is None:
+            center = coords.mean(dim=1)
+        if center.ndim == 1:
+            center = center.unsqueeze(0)
+        coords_centered = coords - center.unsqueeze(1)
+        rot_matrix = rotation.to_matrix()
+        # Match AtomStack.rotate: (x - c) @ R.T + c
+        coords_batch = torch.einsum("rji,bnj->rbni", rot_matrix, coords_centered) + center.unsqueeze(0)
+
+        with torch.no_grad():
+            volume = compute_batch_from_coords(
+                coords_batch,
+                atom_stack.bfactors,
+                atom_stack.atomic_numbers,
+                atom_stack.occupancies,
+            )
+            if volume.ndim == 5 and volume.shape[1] == 1:
+                volume = volume.squeeze(1)
             depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-            projection = volume.squeeze(dim=projection_axis) * depth
-        else:
-            depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-            projection = volume.sum(dim=projection_axis) * depth
+            proj_axis = projection_axis + 1
+            if collapse_projection_axis:
+                projection = volume.squeeze(dim=proj_axis) * depth
+            else:
+                projection = volume.sum(dim=proj_axis) * depth
+    else:
+        rotated_stack = atom_stack.rotate(rotation, center=center, copy=True)
+        with torch.no_grad():
+            volume = compute_volume_over_insertable_matrices(
+                atom_stack=rotated_stack,
+                lattice=lattice,
+                B=atom_batch_size,
+                per_voxel_averaging=True,
+                subvolume_mask_in_indices=None,
+                use_checkpointing=False,
+                verbose=False,
+            )
+            if collapse_projection_axis:
+                depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
+                projection = volume.squeeze(dim=projection_axis) * depth
+            else:
+                depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
+                projection = volume.sum(dim=projection_axis) * depth
 
     rotation_matrix = rotation.to_matrix().detach().cpu()[0]
     return projection, rotation_matrix
+
+
+def _load_sequences_from_config(config_path: str):
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    sequences = cfg["protein"]["sequences"]
+    for entry in sequences:
+        entry.setdefault("sequence_type", "proteinChain")
+    chains_to_read = cfg["protein"].get("chains_to_use")
+    return sequences, chains_to_read
+
+
+def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: torch.device):
+    coords, mask, bfactors, elements = load_pdb_atom_locations_full(
+        pdb_file=str(pdb_path),
+        full_sequences_dict=sequences,
+        chains_to_read=chains_to_read,
+        return_elements=True,
+        return_bfacs=True,
+        return_mask=True,
+        device=device,
+    )
+    mask = mask.to(dtype=torch.bool)
+    coords = coords[mask].unsqueeze(0)
+    elements = elements[mask]
+    bfactors = bfactors[mask]
+    if bfactors.numel() == 0:
+        raise ValueError("No resolved atoms found after masking; check sequences/chains.")
+    bfactors = bfactors.reshape(1, -1, 1).to(dtype=torch.float32, device=device)
+
+    atom_stack = AtomStack.from_coords_and_atomic_numbers(
+        atom_coordinates=coords,
+        atomic_numbers=elements,
+        device=device,
+    )
+    atom_stack.bfactors = bfactors
+    return atom_stack, int(mask.sum().item()), int(mask.numel())
 
 
 def _generate_dataset_for_pdb(
     pdb_path: Path,
     args: argparse.Namespace,
     device: torch.device,
+    sequences=None,
+    chains_to_read=None,
 ) -> None:
     if not pdb_path.exists():
         raise FileNotFoundError(f"PDB not found: {pdb_path}")
 
     axis = AXIS_TO_DIM[args.projection_axis]
 
-    atom_stack = AtomStack.from_pdb_file(str(pdb_path), device=device)
+    resolved_info = None
+    if sequences is not None:
+        atom_stack, n_resolved, n_total = _atom_stack_from_config(
+            pdb_path, sequences, chains_to_read, device
+        )
+        resolved_info = {"resolved_atoms": n_resolved, "total_atoms": n_total}
+    else:
+        atom_stack = AtomStack.from_pdb_file(str(pdb_path), device=device)
+
     _ensure_bfactors(atom_stack, args.bfactor, args.atomic_radius)
 
     voxel_size = args.voxel_size
@@ -406,6 +513,16 @@ def _generate_dataset_for_pdb(
         device="cpu",
     )
 
+    fast_solver = None
+    if args.use_fast_solver:
+        fast_solver = setup_fast_esp_solver(
+            atom_stack,
+            lattice,
+            per_voxel_averaging=True,
+            use_checkpointing=False,
+            use_autocast=False,
+        )
+
     rotation_iter = _progress(
         range(args.num_rotations),
         args.progress,
@@ -420,6 +537,8 @@ def _generate_dataset_for_pdb(
             collapse_projection_axis=args.collapse_projection_axis,
             atom_batch_size=args.atom_batch_size,
             center=center,
+            use_fast_solver=args.use_fast_solver,
+            fast_solver=fast_solver,
         )
         projections[idx] = projection.detach().cpu()
         rotations[idx] = rotation_matrix
@@ -447,6 +566,12 @@ def _generate_dataset_for_pdb(
         "lattice": lattice_meta,
     }
 
+    if resolved_info is not None:
+        meta["resolved_atoms_only"] = True
+        meta.update(resolved_info)
+    else:
+        meta["resolved_atoms_only"] = False
+
     _save_outputs(projections, rotations, meta, output_path, args.output_format)
 
 
@@ -463,8 +588,19 @@ def main() -> None:
     for pdb_id in args.pdb_ids:
         pdb_paths.append(_download_pdb_if_not_cached(pdb_id, pdb_cache_dir))
 
+    sequences = None
+    chains_to_read = None
+    if args.config:
+        sequences, chains_to_read = _load_sequences_from_config(args.config)
+
     for pdb_path in pdb_paths:
-        _generate_dataset_for_pdb(pdb_path, args, device)
+        _generate_dataset_for_pdb(
+            pdb_path,
+            args,
+            device,
+            sequences=sequences,
+            chains_to_read=chains_to_read,
+        )
 
 
 if __name__ == "__main__":

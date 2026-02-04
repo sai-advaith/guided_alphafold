@@ -165,6 +165,29 @@ class ExperimentManager:
                 loss_weight = getattr(relax_times_config, "weight", 1)
                 weights.append(loss_weight)
 
+            elif "cryoimage" == loss_function_type:
+                cryoimage_config = self.config.loss_function.cryoimage_loss_function
+                loss_function = CryoEM_Images_GuidanceLossFunction(
+                    image_pt_files=cryoimage_config.image_pt_files,
+                    image_json_files=getattr(cryoimage_config, "image_json_files", None),
+                    reference_pdbs=cryoimage_config.reference_pdbs,
+                    mask=self.model_manager.resolved_pdb_to_full_mask,
+                    sequences_dictionary=self.model_manager.sequences_dictionary,
+                    chains_to_read=getattr(cryoimage_config, "chains_to_read", self.config.protein.chains_to_use),
+                    device=self.device,
+                    should_align_to_chains=getattr(self.config.protein, "should_align_to_chains", None),
+                    atom_batch_size=getattr(cryoimage_config, "atom_batch_size", 1024),
+                    loss_reduction=getattr(cryoimage_config, "loss_reduction", "mean"),
+                    loss_type=getattr(cryoimage_config, "loss_type", "mse"),
+                    use_checkpointing=getattr(cryoimage_config, "use_checkpointing", False),
+                    log_projection_every=getattr(cryoimage_config, "log_projection_every", 10),
+                    log_projection_pairs=getattr(cryoimage_config, "log_projection_pairs", 3),
+                    max_rotations_per_batch=getattr(cryoimage_config, "max_rotations_per_batch", None),
+                )
+                loss_functions.append(loss_function)
+                loss_weight = getattr(cryoimage_config, "weight", 1)
+                weights.append(loss_weight)
+
             elif "cryoesp" == loss_function_type:
                 cryoesp_config = self.config.loss_function.cryoesp_loss_function
                 # TODO: Check with vova if anything can be removed or not.
@@ -467,6 +490,21 @@ class ExperimentManager:
             # Use stored starting residue indices (computed during initialization) to preserve original PDB numbering
             starting_residue_indices = getattr(self.model_manager, 'starting_residue_indices', None)
             
+            for i in range(structures.shape[0]):
+                save_structure_full(
+                    structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.sequence_types, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
+                    bfactors=None,
+                    atom_mask=self.model_manager.resolved_pdb_to_full_mask.cpu(),  # Only save resolved atoms, filter out unresolved ones
+                    chain_names=chain_names,
+                    starting_residue_indices=starting_residue_indices  # Preserve original PDB residue numbering
+                )
+        elif "cryoimage" in self.config.loss_function.loss_function_type:
+            # Saving pdbs for cryoimage loss (no special alignment at save time)
+            chain_names = self._get_chain_names_from_sequences_dict(
+                getattr(self.model_manager, 'sequences_dictionary', None)
+            )
+            starting_residue_indices = getattr(self.model_manager, 'starting_residue_indices', None)
+
             for i in range(structures.shape[0]):
                 save_structure_full(
                     structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.sequence_types, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
