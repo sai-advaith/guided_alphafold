@@ -191,6 +191,18 @@ def parse_args() -> argparse.Namespace:
         help="Z-score normalize rendered/GT projections per rotation before loss.",
     )
     parser.add_argument(
+        "--image-blur-sigma",
+        type=float,
+        default=None,
+        help="Gaussian blur sigma for projections before loss.",
+    )
+    parser.add_argument(
+        "--image-blur-kernel-size",
+        type=int,
+        default=None,
+        help="Gaussian blur kernel size (odd). Defaults to ~6*sigma+1.",
+    )
+    parser.add_argument(
         "--max-rotations",
         type=int,
         default=0,
@@ -221,6 +233,18 @@ def parse_args() -> argparse.Namespace:
         "--no-wandb",
         action="store_true",
         help="Disable wandb logging.",
+    )
+    parser.add_argument(
+        "--wandb-name-prefix",
+        type=str,
+        default=None,
+        help="Optional prefix for wandb run name (defaults to LossSuite).",
+    )
+    parser.add_argument(
+        "--wandb-name-suffix",
+        type=str,
+        default=None,
+        help="Optional suffix appended to wandb run name.",
     )
     return parser.parse_args()
 
@@ -354,6 +378,8 @@ def main() -> None:
 
     loss_type = args.loss_type
     normalize_projections = args.normalize_projections
+    image_blur_sigma = args.image_blur_sigma
+    image_blur_kernel_size = args.image_blur_kernel_size
     fft_log_eps = args.fft_log_eps
     fft_bandpass_low = args.fft_bandpass_low
     fft_bandpass_high = args.fft_bandpass_high
@@ -383,6 +409,10 @@ def main() -> None:
             fft_bandpass_high = cryo_cfg.get("fft_bandpass_high")
         if ncc_eps is None:
             ncc_eps = cryo_cfg.get("ncc_eps")
+        if image_blur_sigma is None:
+            image_blur_sigma = cryo_cfg.get("image_blur_sigma")
+        if image_blur_kernel_size is None:
+            image_blur_kernel_size = cryo_cfg.get("image_blur_kernel_size")
         if ot_p is None:
             ot_p = cryo_cfg.get("ot_p")
         if ot_blur is None:
@@ -451,6 +481,8 @@ def main() -> None:
         max_rotations_per_batch=None,
         use_resolved_atoms_only=True,
         normalize_projections=normalize_projections,
+        image_blur_sigma=image_blur_sigma,
+        image_blur_kernel_size=image_blur_kernel_size,
         fft_log_eps=fft_log_eps,
         fft_bandpass_low=fft_bandpass_low,
         fft_bandpass_high=fft_bandpass_high,
@@ -569,7 +601,7 @@ def main() -> None:
             elif loss_type in ("optimal_transport", "sinkhorn"):
                 loss_label = "ot"
 
-            tag_parts = [loss_label]
+            tag_parts = [loss_label, f"noise{args.noise_std:g}"]
             if loss_topk is not None and loss_topk > 0:
                 tag_parts.append(f"topk{loss_topk}")
             if args.max_rotations and args.max_rotations > 0:
@@ -580,8 +612,13 @@ def main() -> None:
                 tag_parts.append("normg")
             if cosine_lowpass_frac is not None:
                 tag_parts.append(f"lpf{cosine_lowpass_frac:g}")
+            if image_blur_sigma is not None and image_blur_sigma > 0:
+                tag_parts.append(f"blur{image_blur_sigma:g}")
 
-            run_name_full = f"LossSuite_{'_'.join(tag_parts)}"
+            prefix = args.wandb_name_prefix or "LossSuite"
+            run_name_full = f"{prefix}_{'_'.join(tag_parts)}"
+            if args.wandb_name_suffix:
+                run_name_full = f"{run_name_full}_{args.wandb_name_suffix}"
             wandb_run = wandb.init(
                 project=project,
                 name=run_name_full,

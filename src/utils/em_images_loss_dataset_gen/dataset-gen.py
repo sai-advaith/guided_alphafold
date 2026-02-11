@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.io import load_pdb_atom_locations_full
+from src.utils.io import load_pdb_atom_locations_full, create_atom_mask
 
 try:
     from cryoforward.atom_stack import AtomStack
@@ -416,6 +416,81 @@ def _render_projection(
     return projection, rotation_matrix
 
 
+def _is_range_pair(value) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    return all(isinstance(v, (int, float)) for v in value)
+
+
+def _normalize_residue_ranges_per_chain(residue_ranges_pdb):
+    if residue_ranges_pdb is None:
+        return None
+    if not isinstance(residue_ranges_pdb, (list, tuple)):
+        raise ValueError("residue_ranges_pdb must be a list.")
+    if len(residue_ranges_pdb) == 0:
+        return []
+    if _is_range_pair(residue_ranges_pdb[0]):
+        # Single-chain shorthand: [[start, end], [start, end], ...]
+        return [list(residue_ranges_pdb)]
+    return list(residue_ranges_pdb)
+
+
+def _build_residue_subset_mask(sequences, starting_residue_indices, residue_ranges_pdb):
+    ranges_per_chain = _normalize_residue_ranges_per_chain(residue_ranges_pdb)
+    if ranges_per_chain is None:
+        return None
+
+    full_sequences = [[d["sequence"]] * d["count"] for d in sequences]
+    full_sequences = [item for sublist in full_sequences for item in sublist]
+    sequence_types = [
+        sequence_type
+        for dictionary in sequences
+        for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
+    ]
+
+    regions_per_sequence = []
+    for chain_idx, sequence in enumerate(full_sequences):
+        chain_ranges = ranges_per_chain[chain_idx] if chain_idx < len(ranges_per_chain) else None
+        if chain_ranges is None:
+            regions_per_sequence.append([])
+            continue
+        if _is_range_pair(chain_ranges):
+            chain_ranges = [chain_ranges]
+
+        start_idx = 1
+        if starting_residue_indices is not None and chain_idx < len(starting_residue_indices):
+            start_idx = int(starting_residue_indices[chain_idx])
+
+        seq_len = len(sequence)
+        selected_residues = set()
+        for range_pair in chain_ranges:
+            if range_pair is None:
+                continue
+            if not _is_range_pair(range_pair):
+                raise ValueError(
+                    "Each residue range must be [start_pdb_id, end_pdb_id]. "
+                    f"Got: {range_pair!r}"
+                )
+            start_pdb, end_pdb = int(range_pair[0]), int(range_pair[1])
+            start_seq = max(1, start_pdb - start_idx + 1)
+            end_seq = min(seq_len, end_pdb - start_idx + 1)
+            if start_seq <= end_seq:
+                selected_residues.update(range(start_seq, end_seq + 1))
+        regions_per_sequence.append(sorted(selected_residues))
+
+    if not any(len(r) > 0 for r in regions_per_sequence):
+        raise ValueError(
+            "residue_ranges_pdb produced an empty residue selection. "
+            "Check PDB numbering and ranges."
+        )
+
+    return create_atom_mask(
+        full_sequences,
+        regions_per_sequence,
+        sequence_types=sequence_types,
+    )
+
+
 def _load_sequences_from_config(config_path: str):
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -423,20 +498,32 @@ def _load_sequences_from_config(config_path: str):
     for entry in sequences:
         entry.setdefault("sequence_type", "proteinChain")
     chains_to_read = cfg["protein"].get("chains_to_use")
-    return sequences, chains_to_read
+    cryoimage_cfg = cfg.get("loss_function", {}).get("cryoimage_loss_function", {})
+    residue_ranges_pdb = cryoimage_cfg.get("residue_ranges_pdb")
+    return sequences, chains_to_read, residue_ranges_pdb
 
 
-def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: torch.device):
-    coords, mask, bfactors, elements = load_pdb_atom_locations_full(
+def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: torch.device, residue_ranges_pdb=None):
+    load_result = load_pdb_atom_locations_full(
         pdb_file=str(pdb_path),
         full_sequences_dict=sequences,
         chains_to_read=chains_to_read,
         return_elements=True,
         return_bfacs=True,
         return_mask=True,
+        return_starting_indices=True,
         device=device,
     )
+    coords, mask, bfactors, elements, starting_residue_indices = load_result
     mask = mask.to(dtype=torch.bool)
+    residue_subset_mask = _build_residue_subset_mask(
+        sequences=sequences,
+        starting_residue_indices=starting_residue_indices,
+        residue_ranges_pdb=residue_ranges_pdb,
+    )
+    if residue_subset_mask is not None:
+        mask = mask & residue_subset_mask.to(mask.device)
+
     coords = coords[mask].unsqueeze(0)
     elements = elements[mask]
     bfactors = bfactors[mask]
@@ -459,6 +546,7 @@ def _generate_dataset_for_pdb(
     device: torch.device,
     sequences=None,
     chains_to_read=None,
+    residue_ranges_pdb=None,
 ) -> None:
     if not pdb_path.exists():
         raise FileNotFoundError(f"PDB not found: {pdb_path}")
@@ -468,7 +556,7 @@ def _generate_dataset_for_pdb(
     resolved_info = None
     if sequences is not None:
         atom_stack, n_resolved, n_total = _atom_stack_from_config(
-            pdb_path, sequences, chains_to_read, device
+            pdb_path, sequences, chains_to_read, device, residue_ranges_pdb=residue_ranges_pdb
         )
         resolved_info = {"resolved_atoms": n_resolved, "total_atoms": n_total}
     else:
@@ -590,8 +678,9 @@ def main() -> None:
 
     sequences = None
     chains_to_read = None
+    residue_ranges_pdb = None
     if args.config:
-        sequences, chains_to_read = _load_sequences_from_config(args.config)
+        sequences, chains_to_read, residue_ranges_pdb = _load_sequences_from_config(args.config)
 
     for pdb_path in pdb_paths:
         _generate_dataset_for_pdb(
@@ -600,6 +689,7 @@ def main() -> None:
             device,
             sequences=sequences,
             chains_to_read=chains_to_read,
+            residue_ranges_pdb=residue_ranges_pdb,
         )
 
 

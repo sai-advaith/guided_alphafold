@@ -11,7 +11,7 @@ from geomloss import SamplesLoss
 
 from .abstract_loss_funciton import AbstractLossFunction
 from ..protenix.metrics.rmsd import self_aligned_rmsd
-from ..utils.io import load_pdb_atom_locations_full, alignment_mask_by_chain
+from ..utils.io import load_pdb_atom_locations_full, alignment_mask_by_chain, create_atom_mask
 
 from cryoforward.atom_stack import AtomStack
 from cryoforward.cryoesp_calculator import setup_fast_esp_solver
@@ -61,6 +61,10 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         ot_eps: float = 1e-6,
         ot_downsample: int | None = None,
         loss_topk: int | None = None,
+        image_blur_sigma: float | None = None,
+        image_blur_kernel_size: int | None = None,
+        image_blur_sigma_schedule: dict | list | None = None,
+        residue_ranges_pdb: list | None = None,
     ):
         self.device = torch.device(device)
         self.atom_batch_size = atom_batch_size
@@ -92,6 +96,12 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.ot_eps = float(ot_eps)
         self.ot_downsample = ot_downsample if ot_downsample is None else int(ot_downsample)
         self.loss_topk = loss_topk if loss_topk is None else int(loss_topk)
+        self.image_blur_sigma = image_blur_sigma
+        self.image_blur_kernel_size = image_blur_kernel_size
+        self.image_blur_sigma_schedule = image_blur_sigma_schedule
+        self.residue_ranges_pdb = residue_ranges_pdb
+        self._current_image_blur_sigma: float | None = None
+        self._blur_kernel_cache: dict[tuple, torch.Tensor] = {}
         self._ot_loss_function = SamplesLoss(
             loss="sinkhorn",
             p=self.ot_p,
@@ -148,26 +158,109 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
 
         self.reference_structures = []
         for pdb_path in reference_pdbs:
-            coords, mask_tensor, b_factors, elements = load_pdb_atom_locations_full(
+            load_result = load_pdb_atom_locations_full(
                 pdb_file=pdb_path,
                 full_sequences_dict=sequences_dictionary,
                 chains_to_read=chains_to_read,
                 return_elements=True,
                 return_bfacs=True,
                 return_mask=True,
+                return_starting_indices=True,
             )
+            coords, mask_tensor, b_factors, elements, starting_residue_indices = load_result
+            residue_subset_mask = self._build_residue_subset_mask(starting_residue_indices)
             ref = {
                 "coords": coords.to(self.device),
                 "mask": mask_tensor.to(self.device),
                 "bfactors": b_factors.to(self.device),
                 "atomic_numbers": elements.to(self.device),
+                "starting_residue_indices": starting_residue_indices,
+                "residue_subset_mask": residue_subset_mask.to(self.device) if residue_subset_mask is not None else None,
             }
             ref["resolved_mask"] = ref["mask"].to(torch.bool)
+            ref["render_mask"] = self._build_render_mask(ref)
             self.reference_structures.append(ref)
 
         self.last_loss_value = None
         self._last_projection_log_step = None
         self._setup_fast_solver()
+
+    @staticmethod
+    def _is_range_pair(value: Any) -> bool:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return False
+        return all(isinstance(v, (int, float)) for v in value)
+
+    def _normalize_residue_ranges_per_chain(self) -> list | None:
+        if self.residue_ranges_pdb is None:
+            return None
+        if not isinstance(self.residue_ranges_pdb, (list, tuple)):
+            raise ValueError("residue_ranges_pdb must be a list.")
+        if len(self.residue_ranges_pdb) == 0:
+            return []
+
+        first = self.residue_ranges_pdb[0]
+        if self._is_range_pair(first):
+            # Single-chain shorthand: [[start, end], [start, end], ...]
+            return [list(self.residue_ranges_pdb)]
+        return list(self.residue_ranges_pdb)
+
+    def _build_residue_subset_mask(self, starting_residue_indices: list[int] | None) -> torch.Tensor | None:
+        ranges_per_chain = self._normalize_residue_ranges_per_chain()
+        if ranges_per_chain is None:
+            return None
+
+        regions_per_sequence: list[list[int]] = []
+        for chain_idx, sequence in enumerate(self.full_sequences):
+            chain_ranges = ranges_per_chain[chain_idx] if chain_idx < len(ranges_per_chain) else None
+            if chain_ranges is None:
+                regions_per_sequence.append([])
+                continue
+            if self._is_range_pair(chain_ranges):
+                chain_ranges = [chain_ranges]
+
+            start_idx = 1
+            if starting_residue_indices is not None and chain_idx < len(starting_residue_indices):
+                start_idx = int(starting_residue_indices[chain_idx])
+
+            seq_len = len(sequence)
+            selected_residues = set()
+            for range_pair in chain_ranges:
+                if range_pair is None:
+                    continue
+                if not self._is_range_pair(range_pair):
+                    raise ValueError(
+                        "Each residue range must be [start_pdb_id, end_pdb_id]. "
+                        f"Got: {range_pair!r}"
+                    )
+                start_pdb, end_pdb = int(range_pair[0]), int(range_pair[1])
+                start_seq = max(1, start_pdb - start_idx + 1)
+                end_seq = min(seq_len, end_pdb - start_idx + 1)
+                if start_seq <= end_seq:
+                    selected_residues.update(range(start_seq, end_seq + 1))
+            regions_per_sequence.append(sorted(selected_residues))
+
+        if not any(len(r) > 0 for r in regions_per_sequence):
+            raise ValueError(
+                "residue_ranges_pdb produced an empty residue selection. "
+                "Check PDB numbering and ranges."
+            )
+
+        return create_atom_mask(
+            self.full_sequences,
+            regions_per_sequence,
+            sequence_types=self.sequence_types,
+        )
+
+    def _build_render_mask(self, reference: dict) -> torch.Tensor | None:
+        base_mask = reference.get("resolved_mask") if self.use_resolved_atoms_only else None
+        subset_mask = reference.get("residue_subset_mask")
+
+        if subset_mask is None:
+            return base_mask
+        if base_mask is None:
+            return subset_mask.to(torch.bool)
+        return (base_mask & subset_mask.to(torch.bool))
 
     def _normalize_pair(self, rendered: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -177,6 +270,12 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
           rendered: [R, H, W]
           gt:       [R, H, W]
         """
+        sigma = self._current_image_blur_sigma
+        if sigma is None:
+            sigma = self.image_blur_sigma
+        if sigma is not None and sigma > 0:
+            rendered = self._gaussian_blur(rendered, sigma=sigma)
+            gt = self._gaussian_blur(gt, sigma=sigma)
         if not self.normalize_projections:
             return rendered, gt
 
@@ -188,6 +287,101 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         g_mean = gt.mean(dim=dims, keepdim=True)
         g_std = gt.std(dim=dims, keepdim=True).clamp_min(eps)
         return (rendered - r_mean) / r_std, (gt - g_mean) / g_std
+
+    def _gaussian_blur(self, images: torch.Tensor, sigma: float) -> torch.Tensor:
+        if images.ndim != 3:
+            raise ValueError(f"Expected images with shape [R, H, W], got {images.shape}.")
+        sigma = float(sigma)
+        if sigma <= 0:
+            return images
+        kernel = self._get_gaussian_kernel(
+            sigma=sigma,
+            kernel_size=self.image_blur_kernel_size,
+            device=images.device,
+            dtype=images.dtype,
+        )
+        pad = kernel.shape[-1] // 2
+        x = images.unsqueeze(1)  # [R, 1, H, W]
+        x = F.pad(x, (pad, pad, pad, pad), mode="reflect")
+        x = F.conv2d(x, kernel)
+        return x.squeeze(1)
+
+    def _get_gaussian_kernel(
+        self,
+        sigma: float,
+        kernel_size: int | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if kernel_size is None:
+            kernel_size = int(2 * torch.ceil(torch.tensor(3.0 * sigma)).item() + 1)
+        kernel_size = int(kernel_size)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        key = (sigma, kernel_size, str(device), str(dtype))
+        cached = self._blur_kernel_cache.get(key)
+        if cached is not None:
+            return cached
+
+        coords = torch.arange(kernel_size, device=device, dtype=dtype)
+        center = (kernel_size - 1) / 2.0
+        grid = coords - center
+        g1 = torch.exp(-(grid ** 2) / (2 * sigma ** 2))
+        g1 = g1 / g1.sum()
+        kernel_2d = torch.outer(g1, g1)
+        kernel_2d = kernel_2d / kernel_2d.sum()
+        kernel = kernel_2d.unsqueeze(0).unsqueeze(0)
+        self._blur_kernel_cache[key] = kernel
+        return kernel
+
+    def _scheduled_blur_sigma(self, time, step: int | None, i: int | None) -> float | None:
+        schedule = self.image_blur_sigma_schedule
+        if schedule is None:
+            return self.image_blur_sigma
+
+        # Piecewise constant list: [{"step": 0, "sigma": 5.0}, {"step": 100, "sigma": 0.0}]
+        if isinstance(schedule, (list, tuple)):
+            step_val = step if step is not None else i if i is not None else 0
+            best_sigma = None
+            best_step = None
+            for item in schedule:
+                if isinstance(item, dict):
+                    s = int(item.get("step", 0))
+                    sigma = float(item.get("sigma", 0.0))
+                else:
+                    s, sigma = item
+                    s = int(s)
+                    sigma = float(sigma)
+                if s <= step_val and (best_step is None or s > best_step):
+                    best_step = s
+                    best_sigma = sigma
+            return best_sigma if best_sigma is not None else self.image_blur_sigma
+
+        if isinstance(schedule, dict):
+            use_time = bool(schedule.get("use_time", False))
+            start = float(schedule.get("start", self.image_blur_sigma or 0.0))
+            end = float(schedule.get("end", 0.0))
+
+            if use_time and time is not None:
+                t_val = float(time) if not torch.is_tensor(time) else float(time.detach().item())
+                t0 = float(schedule.get("time_start", 1.0))
+                t1 = float(schedule.get("time_end", 0.0))
+                if t0 == t1:
+                    return end
+                # Map t_val to [0,1] based on [t0, t1]
+                t = (t_val - t0) / (t1 - t0)
+            else:
+                step_val = step if step is not None else i if i is not None else 0
+                start_step = int(schedule.get("start_step", 0))
+                end_step = int(schedule.get("end_step", start_step))
+                if end_step <= start_step:
+                    return end
+                t = (step_val - start_step) / float(end_step - start_step)
+
+            t = max(0.0, min(1.0, t))
+            return start + t * (end - start)
+
+        return self.image_blur_sigma
 
     def _projection_loss(self, rendered: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         rendered, gt = self._normalize_pair(rendered, gt)
@@ -439,7 +633,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         coords = reference0["coords"]
         atomic_numbers = reference0["atomic_numbers"]
         bfactors = reference0["bfactors"]
-        resolved_mask = reference0.get("resolved_mask") if self.use_resolved_atoms_only else None
+        resolved_mask = reference0.get("render_mask")
 
         if resolved_mask is not None:
             coords, atomic_numbers, bfactors = self._apply_resolved_mask(
@@ -591,6 +785,9 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
 
     def _align_to_reference(self, x_0_hat: torch.Tensor, reference: dict):
         alignment_mask = self.AF3_to_pdb_mask & self.align_to_chain_mask
+        subset_mask = reference.get("residue_subset_mask")
+        if subset_mask is not None:
+            alignment_mask = alignment_mask & subset_mask.to(self.device)
         _, aligned_x_0_hat, _, _ = self_aligned_rmsd(
             x_0_hat,
             reference["coords"].unsqueeze(0),
@@ -624,9 +821,12 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             self._projection_log_calls += 1
             do_log = (self._projection_log_calls % self._projection_log_every) == 0
 
+        # Update blur sigma based on schedule (if provided).
+        self._current_image_blur_sigma = self._scheduled_blur_sigma(time=time, step=step, i=i)
+
         for dataset_idx, (dataset, reference) in enumerate(zip(self.datasets, self.reference_structures)):
             aligned = self._align_to_reference(x_0_hat, reference)
-            resolved_mask = reference.get("resolved_mask") if self.use_resolved_atoms_only else None
+            resolved_mask = reference.get("render_mask")
 
             gt = dataset["projections"]
             rendered = self._render_all_rotations(
@@ -656,6 +856,8 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             "loss": self.last_loss_value,  # keep for MultiLossFunction common_loss
             "cryoimage/loss": self.last_loss_value,
         }
+        if self._current_image_blur_sigma is not None:
+            log["cryoimage/blur_sigma"] = float(self._current_image_blur_sigma)
         payload = self._projection_log_payload
         if payload is not None:
             try:
