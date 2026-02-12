@@ -421,6 +421,18 @@ def load_pdb_atom_locations_full(
                         print(f"Warning: Atom {atom.name} is not found in the sequence of the residue {residue.name} of type {sequence_types[chain_i]}. A modification or a bug...?!")
                         continue 
                 
+                if atom_index_in_pdb >= len(atom_positions_full_perresidue[chain_i][residue_index_in_pdb]):
+                    expected_residue = gemmi.expand_one_letter(
+                        full_sequences[chain_i][residue_index_in_pdb],
+                        SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_types[chain_i]],
+                    )
+                    raise ValueError(
+                        "Resolved PDB residue does not match configured sequence at mapped position. "
+                        f"chain={chain.name}, pdb_residue={residue.seqid.num}, pdb_resname={residue.name}, "
+                        f"mapped_seq_index={residue_index_in_pdb + 1}, expected_resname={expected_residue}. "
+                        "This usually means the input sequence does not map contiguously to the chosen chain."
+                    )
+
                 atom_positions_full_perresidue[chain_i][residue_index_in_pdb][atom_index_in_pdb] = (atom.pos.x, atom.pos.y, atom.pos.z)
                 mask[chain_i][residue_index_in_pdb][atom_index_in_pdb] = [1]
 
@@ -714,9 +726,21 @@ def find_starting_zero_indeces_of_alignment(
     starting_zero_indices = np.zeros(len(resolved_sequences), dtype=np.int64) 
     pdb_alignment_starts = np.zeros(len(resolved_sequences), dtype=np.int64)  # Where PDB alignment starts
     for resolved_sequence_idx, corresponding_fasta_idx in resolved_to_fasta_dict.items():
+        resolved_seq = resolved_sequences[resolved_sequence_idx]
+        fasta_seq = list(fasta_sequences.keys())[corresponding_fasta_idx]
+
+        # Fast-path for contiguous subsequences:
+        # if FASTA appears exactly once in the resolved chain sequence,
+        # prefer exact substring matching over local alignment.
+        exact_match_count = resolved_seq.count(fasta_seq)
+        if exact_match_count == 1:
+            pdb_alignment_starts[resolved_sequence_idx] = resolved_seq.index(fasta_seq)
+            starting_zero_indices[resolved_sequence_idx] = 0
+            continue
+
         alignment = aligner.align(
-            resolved_sequences[resolved_sequence_idx], 
-            list(fasta_sequences.keys())[corresponding_fasta_idx]
+            resolved_seq, 
+            fasta_seq
         )
         # coordinates[0,0] = where PDB sequence alignment starts (0 if no prefix, >0 if PDB has prefix)
         # coordinates[1,0] = where FASTA sequence alignment starts (usually 0, but could be >0 if FASTA starts later)
@@ -738,20 +762,27 @@ def renumber_chains_by_starting_indices(
     1. PDB has prefix (pdb_alignment_start > 0): First aligned PDB residue maps to FASTA start.
        Prefix residues get negative numbers and are skipped.
     2. FASTA is shorter: Extra PDB residues get numbers beyond FASTA length and are skipped by bounds check.
+
+    Important: pdb_alignment_starts is an index in the *resolved residue list*.
+    PDB residue numbering may contain gaps, so we must anchor using the aligned
+    residue's actual seqid value (not by assuming contiguous numbering).
     """
     chains_renumbered = []
     for chain_idx, (chain, starting_index, pdb_alignment_start) in enumerate(zip(chains, starting_one_indices, pdb_alignment_starts)):
-        current_resolved_1_index = chain[0].seqid.num
-        corresponding_fasta_1_index = starting_index
-        
-        # Compute delta such that:
-        # - If PDB has prefix (pdb_alignment_start > 0): PDB sequence position pdb_alignment_start maps to FASTA position starting_index
-        # - PDB sequence position 0 (chain[0]) maps to: starting_index - pdb_alignment_start
-        # So: delta = (starting_index - pdb_alignment_start) - current_resolved_1_index
-        # This ensures:
-        #   - PDB seq pos 0 → FASTA pos (starting_index - pdb_alignment_start) [may be negative, will be skipped]
-        #   - PDB seq pos pdb_alignment_start → FASTA pos starting_index [correct alignment]
-        delta = (corresponding_fasta_1_index - pdb_alignment_start) - current_resolved_1_index
+        if len(chain) == 0:
+            chains_renumbered.append(chain)
+            continue
+
+        aligned_pos = int(pdb_alignment_start)
+        if aligned_pos < 0 or aligned_pos >= len(chain):
+            raise ValueError(
+                f"Invalid alignment start {aligned_pos} for chain {chain.name} with {len(chain)} residues."
+            )
+
+        # Anchor on the aligned residue's *actual* PDB seqid.
+        aligned_residue_1_index = chain[aligned_pos].seqid.num
+        corresponding_fasta_1_index = int(starting_index)
+        delta = corresponding_fasta_1_index - aligned_residue_1_index
         
         for residue in chain: 
             residue.seqid.num = residue.seqid.num + delta
