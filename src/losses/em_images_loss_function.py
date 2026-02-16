@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -11,11 +9,12 @@ from geomloss import SamplesLoss
 
 from .abstract_loss_funciton import AbstractLossFunction
 from ..protenix.metrics.rmsd import self_aligned_rmsd
-from ..utils.io import load_pdb_atom_locations_full, alignment_mask_by_chain, create_atom_mask
-
-from cryoforward.atom_stack import AtomStack
-from cryoforward.cryoesp_calculator import setup_fast_esp_solver
-from cryoforward.lattice import Lattice
+from ..utils.cryoimage_renderer import (
+    CryoImageDataset,
+    CryoImageRenderer,
+)
+from ..utils.io import load_pdb_atom_locations_full, alignment_mask_by_chain
+from ..utils.residue_range_mask import build_residue_subset_mask
 
 
 class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
@@ -65,6 +64,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         image_blur_kernel_size: int | None = None,
         image_blur_sigma_schedule: dict | list | None = None,
         residue_ranges_pdb: list | None = None,
+        bfactor_override: float | None = None,
     ):
         self.device = torch.device(device)
         self.atom_batch_size = atom_batch_size
@@ -75,8 +75,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self._projection_log_pairs = log_projection_pairs
         self._projection_log_calls = 0
         self._projection_log_payload = None
-        self._fast_esp_solver = None
-        self._fast_esp_lattice = None
+        self._fast_renderer: CryoImageRenderer | None = None
         self.max_rotations_per_batch = max_rotations_per_batch
         self.use_resolved_atoms_only = use_resolved_atoms_only
         self.normalize_projections = normalize_projections
@@ -100,6 +99,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.image_blur_kernel_size = image_blur_kernel_size
         self.image_blur_sigma_schedule = image_blur_sigma_schedule
         self.residue_ranges_pdb = residue_ranges_pdb
+        self.bfactor_override = None if bfactor_override is None else float(bfactor_override)
         self._current_image_blur_sigma: float | None = None
         self._blur_kernel_cache: dict[tuple, torch.Tensor] = {}
         self._ot_loss_function = SamplesLoss(
@@ -123,6 +123,8 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             )
         if image_json_files is not None and len(image_json_files) != len(image_pt_files):
             raise ValueError("image_json_files must match image_pt_files length.")
+        if self.bfactor_override is not None and self.bfactor_override < 0:
+            raise ValueError("bfactor_override must be non-negative.")
 
         self.AF3_to_pdb_mask = mask.to(self.device)
 
@@ -150,11 +152,11 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         ).to(self.device)
 
         # Load datasets and reference conformations
-        self.datasets = []
-        for idx, pt_path in enumerate(image_pt_files):
-            json_path = None if image_json_files is None else image_json_files[idx]
-            dataset = self._load_dataset(pt_path, json_path)
-            self.datasets.append(dataset)
+        self.dataset: CryoImageDataset = CryoImageDataset.from_paths(
+            pt_paths=image_pt_files,
+            json_paths=image_json_files,
+            device=self.device,
+        )
 
         self.reference_structures = []
         for pdb_path in reference_pdbs:
@@ -168,6 +170,8 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
                 return_starting_indices=True,
             )
             coords, mask_tensor, b_factors, elements, starting_residue_indices = load_result
+            if self.bfactor_override is not None:
+                b_factors = torch.full_like(b_factors, self.bfactor_override)
             residue_subset_mask = self._build_residue_subset_mask(starting_residue_indices)
             ref = {
                 "coords": coords.to(self.device),
@@ -185,71 +189,12 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self._last_projection_log_step = None
         self._setup_fast_solver()
 
-    @staticmethod
-    def _is_range_pair(value: Any) -> bool:
-        if not isinstance(value, (list, tuple)) or len(value) != 2:
-            return False
-        return all(isinstance(v, (int, float)) for v in value)
-
-    def _normalize_residue_ranges_per_chain(self) -> list | None:
-        if self.residue_ranges_pdb is None:
-            return None
-        if not isinstance(self.residue_ranges_pdb, (list, tuple)):
-            raise ValueError("residue_ranges_pdb must be a list.")
-        if len(self.residue_ranges_pdb) == 0:
-            return []
-
-        first = self.residue_ranges_pdb[0]
-        if self._is_range_pair(first):
-            # Single-chain shorthand: [[start, end], [start, end], ...]
-            return [list(self.residue_ranges_pdb)]
-        return list(self.residue_ranges_pdb)
-
     def _build_residue_subset_mask(self, starting_residue_indices: list[int] | None) -> torch.Tensor | None:
-        ranges_per_chain = self._normalize_residue_ranges_per_chain()
-        if ranges_per_chain is None:
-            return None
-
-        regions_per_sequence: list[list[int]] = []
-        for chain_idx, sequence in enumerate(self.full_sequences):
-            chain_ranges = ranges_per_chain[chain_idx] if chain_idx < len(ranges_per_chain) else None
-            if chain_ranges is None:
-                regions_per_sequence.append([])
-                continue
-            if self._is_range_pair(chain_ranges):
-                chain_ranges = [chain_ranges]
-
-            start_idx = 1
-            if starting_residue_indices is not None and chain_idx < len(starting_residue_indices):
-                start_idx = int(starting_residue_indices[chain_idx])
-
-            seq_len = len(sequence)
-            selected_residues = set()
-            for range_pair in chain_ranges:
-                if range_pair is None:
-                    continue
-                if not self._is_range_pair(range_pair):
-                    raise ValueError(
-                        "Each residue range must be [start_pdb_id, end_pdb_id]. "
-                        f"Got: {range_pair!r}"
-                    )
-                start_pdb, end_pdb = int(range_pair[0]), int(range_pair[1])
-                start_seq = max(1, start_pdb - start_idx + 1)
-                end_seq = min(seq_len, end_pdb - start_idx + 1)
-                if start_seq <= end_seq:
-                    selected_residues.update(range(start_seq, end_seq + 1))
-            regions_per_sequence.append(sorted(selected_residues))
-
-        if not any(len(r) > 0 for r in regions_per_sequence):
-            raise ValueError(
-                "residue_ranges_pdb produced an empty residue selection. "
-                "Check PDB numbering and ranges."
-            )
-
-        return create_atom_mask(
-            self.full_sequences,
-            regions_per_sequence,
+        return build_residue_subset_mask(
+            full_sequences=self.full_sequences,
             sequence_types=self.sequence_types,
+            starting_residue_indices=starting_residue_indices,
+            residue_ranges_pdb=self.residue_ranges_pdb,
         )
 
     def _build_render_mask(self, reference: dict) -> torch.Tensor | None:
@@ -581,54 +526,35 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             return loss
         return loss.mean()
 
-    def _load_dataset(self, pt_path: str, json_path: str | None):
-        pt_path = Path(pt_path)
-        data = torch.load(pt_path, map_location="cpu")
-        meta = data.get("meta")
-
-        if meta is None:
-            if json_path is None:
-                json_path = str(pt_path.with_suffix(".json"))
-            meta = json.loads(Path(json_path).read_text())
-
-        lattice_meta = meta.get("lattice", {})
-        grid_dimensions = lattice_meta.get("grid_dimensions")
-        voxel_sizes = lattice_meta.get("voxel_sizes")
-        left_bottom = lattice_meta.get("left_bottom")
-        right_upper = lattice_meta.get("right_upper")
-        sublattice_radius = lattice_meta.get("sublattice_radius", 10.0)
-
-        if grid_dimensions is None or voxel_sizes is None:
-            raise ValueError(f"Missing lattice metadata in {pt_path}")
-
-        lattice = Lattice.from_grid_dimensions_and_voxel_sizes(
-            grid_dimensions=tuple(grid_dimensions),
-            voxel_sizes_in_A=tuple(voxel_sizes),
-            left_bottom_point_in_A=left_bottom,
-            right_upper_point_in_A=right_upper,
-            sublattice_radius_in_A=sublattice_radius,
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        projection_axis = lattice_meta.get("projection_axis")
-        if projection_axis is None:
-            axis_map = {"x": 0, "y": 1, "z": 2}
-            projection_axis = axis_map[meta["projection_axis"]]
-
-        return {
-            "projections": data["projections"].to(self.device),
-            "rotations": data["rotations"].to(self.device),
-            "lattice": lattice,
-            "projection_axis": projection_axis,
-            "collapse_projection_axis": lattice_meta.get("collapse_projection_axis", True),
-        }
-
     def _setup_fast_solver(self) -> None:
-        if not self.datasets or not self.reference_structures:
+        if self.dataset.num_conformations <= 0 or not self.reference_structures:
             raise RuntimeError("Datasets and reference structures must be loaded before setting up the ESP solver.")
+        if self.dataset.num_conformations != len(self.reference_structures):
+            raise RuntimeError(
+                "The number of image conformations must match the number of reference structures. "
+                f"Got {self.dataset.num_conformations} and {len(self.reference_structures)}."
+            )
 
-        dataset0 = self.datasets[0]
+        def _renderer_compat_key(conformation: dict[str, Any]) -> tuple:
+            lattice = conformation["lattice"]
+            return (
+                tuple(int(x) for x in lattice.grid_dimensions.tolist()),
+                tuple(float(x) for x in lattice.voxel_sizes_in_A.tolist()),
+                int(conformation["projection_axis"]),
+                bool(conformation["collapse_projection_axis"]),
+            )
+
+        dataset0 = self.dataset.get_conformation(0)
+        base_key = _renderer_compat_key(dataset0)
+        for dataset_idx in range(1, self.dataset.num_conformations):
+            conformation = self.dataset.get_conformation(dataset_idx)
+            key = _renderer_compat_key(conformation)
+            if key != base_key:
+                raise ValueError(
+                    "Single-renderer mode requires all datasets to share lattice/projection settings. "
+                    f"Dataset 0 key={base_key}, dataset {dataset_idx} key={key}."
+                )
+
         reference0 = self.reference_structures[0]
         coords = reference0["coords"]
         atomic_numbers = reference0["atomic_numbers"]
@@ -636,152 +562,47 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         resolved_mask = reference0.get("render_mask")
 
         if resolved_mask is not None:
-            coords, atomic_numbers, bfactors = self._apply_resolved_mask(
+            coords, atomic_numbers, bfactors = CryoImageRenderer.apply_atom_mask(
                 coords, atomic_numbers, bfactors, resolved_mask
             )
-        if coords.ndim == 2:
-            coords = coords.unsqueeze(0)
-        if bfactors.ndim == 1:
-            bfactors = bfactors.unsqueeze(0)
-        if bfactors.ndim == 2:
-            bfactors = bfactors.unsqueeze(-1)
-        if bfactors.shape[0] == 1 and coords.shape[0] > 1:
-            bfactors = bfactors.expand(coords.shape[0], -1, -1)
+        if atomic_numbers is None or bfactors is None:
+            raise RuntimeError("Reference structure is missing atomic_numbers or bfactors for rendering.")
 
-        base_stack = AtomStack.from_coords_and_atomic_numbers(
-            atom_coordinates=coords,
+        self._fast_renderer = CryoImageRenderer.from_coords_and_atomic_numbers(
+            coords=coords,
             atomic_numbers=atomic_numbers,
+            bfactors=bfactors,
+            lattice=dataset0["lattice"],
+            projection_axis=int(dataset0["projection_axis"]),
+            collapse_projection_axis=bool(dataset0["collapse_projection_axis"]),
             device=self.device,
-        )
-        base_stack.bfactors = bfactors
-        if getattr(base_stack, "occupancies", None) is None:
-            base_stack.occupancies = torch.ones(
-                (coords.shape[0],),
-                dtype=coords.dtype,
-                device=coords.device,
-            )
-
-        lattice = dataset0["lattice"]
-        self._fast_esp_solver = setup_fast_esp_solver(
-            base_stack,
-            lattice,
-            per_voxel_averaging=True,
             use_checkpointing=False,
             use_autocast=False,
         )
-        self._fast_esp_lattice = lattice
 
     def _render_all_rotations(
         self,
         coords: torch.Tensor,
         atomic_numbers: torch.Tensor,
         bfactors: torch.Tensor,
-        dataset: dict,
+        rotations: torch.Tensor,
         resolved_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self._fast_renderer is None:
+            raise RuntimeError("Fast renderer was not initialized.")
         if resolved_mask is not None:
-            coords, atomic_numbers, bfactors = self._apply_resolved_mask(
+            coords, atomic_numbers, bfactors = CryoImageRenderer.apply_atom_mask(
                 coords, atomic_numbers, bfactors, resolved_mask
             )
-        if coords.ndim == 2:
-            coords = coords.unsqueeze(0)
-        batch = coords.shape[0]
-        if bfactors.ndim == 2:
-            bfactors = bfactors.unsqueeze(-1)
-        if bfactors.shape[0] == 1 and batch > 1:
-            bfactors = bfactors.expand(batch, -1, -1)
-
-        if self._fast_esp_solver is None or self._fast_esp_lattice is None:
-            raise RuntimeError("Fast ESP solver was not initialized during setup.")
-        _, compute_batch_from_coords = self._fast_esp_solver
-
-        rotations = dataset["rotations"]
-        num_rots = int(rotations.shape[0])
-
-        base_batch = coords.shape[0]
-        center = coords.mean(dim=1, keepdim=True)
-        coords_centered = coords - center
-
-        lattice = self._fast_esp_lattice
-        grid_dims = tuple(int(x) for x in lattice.grid_dimensions.tolist())
-        projection_axis = int(dataset["projection_axis"])
-        collapse_projection_axis = bool(dataset["collapse_projection_axis"])
-        depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-        proj_axis = projection_axis + 1  # account for [rot] dim
-
-        atomic_numbers_for_solver = atomic_numbers.contiguous()
-        if atomic_numbers_for_solver.ndim == 1:
-            atomic_numbers_for_solver = atomic_numbers_for_solver.unsqueeze(-1)
-        bfactors_for_solver = bfactors.contiguous()
-        occupancies_for_solver = torch.ones(
-            (base_batch,),
-            dtype=coords.dtype,
-            device=coords.device,
+        if atomic_numbers is None or bfactors is None:
+            raise RuntimeError("Atomic numbers and bfactors are required for projection rendering.")
+        return self._fast_renderer.render_all_rotations_from_coords(
+            coords=coords,
+            atomic_numbers=atomic_numbers,
+            bfactors=bfactors,
+            rotations=rotations,
+            max_rotations_per_batch=self.max_rotations_per_batch,
         )
-
-        max_rots = self.max_rotations_per_batch
-        if max_rots is None or max_rots <= 0:
-            max_rots = num_rots
-
-        projections = []
-        for rot_start in range(0, num_rots, max_rots):
-            rot_end = min(rot_start + max_rots, num_rots)
-            rot_batch = rotations[rot_start:rot_end]
-            # Match cryoforward AtomStack.rotate convention: (x - c) @ R.T + c
-            coords_batch = torch.einsum("rji,bnj->rbni", rot_batch, coords_centered) + center.unsqueeze(0)
-
-            vols = compute_batch_from_coords(
-                coords_batch,
-                bfactors_for_solver,
-                atomic_numbers_for_solver,
-                occupancies_for_solver,
-            )
-
-            if vols.ndim == 2:
-                vols = vols.reshape(-1, *grid_dims)
-            elif vols.ndim == 5 and vols.shape[1] == 1:
-                vols = vols.squeeze(1)
-
-            if collapse_projection_axis:
-                proj = vols.squeeze(dim=proj_axis) * depth
-            else:
-                proj = vols.sum(dim=proj_axis) * depth
-
-            projections.append(proj)
-
-        projections = torch.cat(projections, dim=0)
-        return projections
-
-    @staticmethod
-    def _apply_resolved_mask(
-        coords: torch.Tensor,
-        atomic_numbers: torch.Tensor,
-        bfactors: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if coords.ndim == 2:
-            coords = coords[mask]
-        elif coords.ndim == 3:
-            coords = coords[:, mask, :]
-
-        if atomic_numbers is not None:
-            if atomic_numbers.ndim == 1:
-                atomic_numbers = atomic_numbers[mask]
-            elif atomic_numbers.ndim == 2:
-                if atomic_numbers.shape[0] == mask.shape[0]:
-                    atomic_numbers = atomic_numbers[mask]
-                elif atomic_numbers.shape[1] == mask.shape[0]:
-                    atomic_numbers = atomic_numbers[:, mask]
-
-        if bfactors is not None:
-            if bfactors.ndim == 1:
-                bfactors = bfactors[mask]
-            elif bfactors.ndim == 2:
-                bfactors = bfactors[:, mask]
-            elif bfactors.ndim == 3:
-                bfactors = bfactors[:, mask, :]
-
-        return coords, atomic_numbers, bfactors
 
     def _align_to_reference(self, x_0_hat: torch.Tensor, reference: dict):
         alignment_mask = self.AF3_to_pdb_mask & self.align_to_chain_mask
@@ -823,17 +644,20 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
 
         # Update blur sigma based on schedule (if provided).
         self._current_image_blur_sigma = self._scheduled_blur_sigma(time=time, step=step, i=i)
+        if self._fast_renderer is None:
+            raise RuntimeError("Fast renderer is not initialized.")
 
-        for dataset_idx, (dataset, reference) in enumerate(zip(self.datasets, self.reference_structures)):
+        for dataset_idx, reference in enumerate(self.reference_structures):
+            conformation = self.dataset.get_conformation(dataset_idx)
             aligned = self._align_to_reference(x_0_hat, reference)
             resolved_mask = reference.get("render_mask")
 
-            gt = dataset["projections"]
+            gt = conformation["projections"]
             rendered = self._render_all_rotations(
                 coords=aligned,
                 atomic_numbers=reference["atomic_numbers"],
-                bfactors=reference["bfactors"].unsqueeze(0).unsqueeze(-1),
-                dataset=dataset,
+                bfactors=reference["bfactors"],
+                rotations=conformation["rotations"],
                 resolved_mask=resolved_mask,
             )
 

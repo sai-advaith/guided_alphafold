@@ -202,6 +202,7 @@ class ExperimentManager:
                     ot_eps=getattr(cryoimage_config, "ot_eps", 1e-6),
                     ot_downsample=getattr(cryoimage_config, "ot_downsample", None),
                     residue_ranges_pdb=getattr(cryoimage_config, "residue_ranges_pdb", None),
+                    bfactor_override=getattr(cryoimage_config, "bfactor_override", None),
                 )
                 loss_functions.append(loss_function)
                 loss_weight = getattr(cryoimage_config, "weight", 1)

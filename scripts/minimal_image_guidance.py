@@ -395,8 +395,10 @@ def main() -> None:
     ot_downsample = args.ot_downsample
     cosine_lowpass_frac = args.cosine_lowpass_frac
     cosine_lowpass_k = args.cosine_lowpass_k
+    bfactor_override = None
     if cfg is not None:
         cryo_cfg = cfg.get("loss_function", {}).get("cryoimage_loss_function", {})
+        bfactor_override = cryo_cfg.get("bfactor_override")
         if loss_type is None:
             loss_type = cryo_cfg.get("loss_type", "mse")
         if loss_topk is None:
@@ -496,6 +498,7 @@ def main() -> None:
         ot_eps=ot_eps,
         ot_downsample=ot_downsample,
         loss_topk=loss_topk,
+        bfactor_override=bfactor_override,
     )
 
     guidance_scale = args.guidance_scale

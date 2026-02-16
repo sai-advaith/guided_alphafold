@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import math
 import shutil
 import sys
 import warnings
@@ -24,11 +23,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.io import load_pdb_atom_locations_full, create_atom_mask
+from src.utils.io import load_pdb_atom_locations_full
+from src.utils.residue_range_mask import build_residue_subset_mask
 
 try:
+    from src.utils.cryoimage_renderer import (
+        CryoImageRenderer,
+        prepare_lattice_from_atom_stack,
+        projection_shape,
+    )
     from cryoforward.atom_stack import AtomStack
-    from cryoforward.cryoesp_calculator import compute_volume_over_insertable_matrices, setup_fast_esp_solver
     from cryoforward.lattice import Lattice
     from cryoforward.utils.rigid_transform import Rotation
 except ImportError as exc:
@@ -44,6 +48,11 @@ AXIS_TO_DIM = {
     "y": 1,
     "z": 2,
 }
+
+
+def _canonical_output_pdb_id(pdb_path: Path) -> str:
+    # Normalize dataset IDs so outputs are stable regardless input path casing.
+    return pdb_path.stem.upper()
 
 
 def _progress(iterable, enabled: bool, desc: str):
@@ -131,24 +140,6 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         dest="collapse_projection_axis",
         help="Use a full 3D lattice and sum along the projection axis.",
-    )
-    parser.add_argument(
-        "--use-fast-solver",
-        action="store_true",
-        default=True,
-        help="Use cryoforward's fast solver (matches guidance loss).",
-    )
-    parser.add_argument(
-        "--slow-solver",
-        action="store_false",
-        dest="use_fast_solver",
-        help="Use the reference slow solver (compute_volume_over_insertable_matrices).",
-    )
-    parser.add_argument(
-        "--atom-batch-size",
-        type=int,
-        default=1024,
-        help="Atom batch size for compute_volume_over_insertable_matrices.",
     )
     parser.add_argument(
         "--bfactor",
@@ -240,73 +231,6 @@ def _download_pdb_if_not_cached(pdb_id: str, cache_dir: Path) -> Path:
     return dest_path
 
 
-def _projection_shape(grid_dims: tuple[int, int, int], axis: int) -> tuple[int, int]:
-    if axis == 0:
-        return (grid_dims[1], grid_dims[2])
-    if axis == 1:
-        return (grid_dims[0], grid_dims[2])
-    return (grid_dims[0], grid_dims[1])
-
-
-def _prepare_lattice(
-    atom_stack: AtomStack,
-    voxel_size: float,
-    padding: float,
-    sublattice_radius: float,
-    projection_axis: int,
-    collapse_projection_axis: bool,
-    device: torch.device,
-) -> tuple[Lattice, dict, torch.Tensor]:
-    coords = atom_stack.atom_coordinates[0]
-    center = coords.mean(dim=0)
-    radius = torch.linalg.norm(coords - center, dim=1).max().item()
-
-    half_span = radius + padding
-    span = 2.0 * half_span
-    grid_dim = int(math.ceil(span / voxel_size)) + 1
-    half_span_adjusted = 0.5 * (grid_dim - 1) * voxel_size
-
-    center_cpu = center.detach().cpu().numpy()
-    left_bottom = (center_cpu - half_span_adjusted).tolist()
-    right_upper = (center_cpu + half_span_adjusted).tolist()
-
-    grid_dimensions = [grid_dim, grid_dim, grid_dim]
-    voxel_sizes = [voxel_size, voxel_size, voxel_size]
-    projection_depth = grid_dim * voxel_size
-
-    if collapse_projection_axis:
-        grid_dimensions[projection_axis] = 1
-        voxel_sizes[projection_axis] = projection_depth
-        left_bottom[projection_axis] = float(center_cpu[projection_axis])
-        right_upper[projection_axis] = float(center_cpu[projection_axis])
-
-    lattice = Lattice.from_grid_dimensions_and_voxel_sizes(
-        grid_dimensions=tuple(grid_dimensions),
-        voxel_sizes_in_A=tuple(voxel_sizes),
-        left_bottom_point_in_A=left_bottom,
-        right_upper_point_in_A=right_upper,
-        sublattice_radius_in_A=sublattice_radius,
-        dtype=torch.float32,
-        device=device,
-    )
-
-    lattice_meta = {
-        "grid_dimensions": grid_dimensions,
-        "voxel_sizes": voxel_sizes,
-        "left_bottom": left_bottom,
-        "right_upper": right_upper,
-        "center": center_cpu.tolist(),
-        "radius": radius,
-        "padding": padding,
-        "sublattice_radius": sublattice_radius,
-        "projection_axis": projection_axis,
-        "projection_depth": projection_depth,
-        "collapse_projection_axis": collapse_projection_axis,
-    }
-
-    return lattice, lattice_meta, center.unsqueeze(0)
-
-
 def _ensure_bfactors(atom_stack: AtomStack, bfactor_override: float | None, atomic_radius: float) -> None:
     if bfactor_override is not None:
         atom_stack.fill_constant_bfactor(bfactor_override)
@@ -353,142 +277,38 @@ def _render_projection(
     lattice: Lattice,
     projection_axis: int,
     collapse_projection_axis: bool,
-    atom_batch_size: int,
     center: torch.Tensor | None = None,
     rotation: Rotation | None = None,
     *,
-    use_fast_solver: bool,
-    fast_solver=None,
+    fast_renderer: CryoImageRenderer | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if rotation is None:
         rotation = Rotation.random(batch=1, device=atom_stack.device)
 
-    if use_fast_solver:
-        if fast_solver is None:
-            raise ValueError("fast_solver must be provided when use_fast_solver=True")
-        _, compute_batch_from_coords = fast_solver
+    rot_matrix = rotation.to_matrix()
+    if fast_renderer is None:
+        fast_renderer = CryoImageRenderer.from_atom_stack(
+            atom_stack=atom_stack,
+            lattice=lattice,
+            projection_axis=projection_axis,
+            collapse_projection_axis=collapse_projection_axis,
+            use_checkpointing=False,
+            use_autocast=False,
+        )
 
-        coords = atom_stack.atom_coordinates
-        if center is None:
-            center = coords.mean(dim=1)
-        if center.ndim == 1:
-            center = center.unsqueeze(0)
-        coords_centered = coords - center.unsqueeze(1)
-        rot_matrix = rotation.to_matrix()
-        # Match AtomStack.rotate: (x - c) @ R.T + c
-        coords_batch = torch.einsum("rji,bnj->rbni", rot_matrix, coords_centered) + center.unsqueeze(0)
-
-        with torch.no_grad():
-            volume = compute_batch_from_coords(
-                coords_batch,
-                atom_stack.bfactors,
-                atom_stack.atomic_numbers,
-                atom_stack.occupancies,
-            )
-            if volume.ndim == 5 and volume.shape[1] == 1:
-                volume = volume.squeeze(1)
-            depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-            proj_axis = projection_axis + 1
-            if collapse_projection_axis:
-                projection = volume.squeeze(dim=proj_axis) * depth
-            else:
-                projection = volume.sum(dim=proj_axis) * depth
-    else:
-        rotated_stack = atom_stack.rotate(rotation, center=center, copy=True)
-        with torch.no_grad():
-            volume = compute_volume_over_insertable_matrices(
-                atom_stack=rotated_stack,
-                lattice=lattice,
-                B=atom_batch_size,
-                per_voxel_averaging=True,
-                subvolume_mask_in_indices=None,
-                use_checkpointing=False,
-                verbose=False,
-            )
-            if collapse_projection_axis:
-                depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-                projection = volume.squeeze(dim=projection_axis) * depth
-            else:
-                depth = float(lattice.voxel_sizes_in_A[projection_axis].item())
-                projection = volume.sum(dim=projection_axis) * depth
+    with torch.no_grad():
+        projection = fast_renderer.render_all_rotations_from_coords(
+            coords=atom_stack.atom_coordinates,
+            atomic_numbers=atom_stack.atomic_numbers,
+            bfactors=atom_stack.bfactors,
+            rotations=rot_matrix,
+            max_rotations_per_batch=1,
+            center=center,
+            occupancies=atom_stack.occupancies,
+        )[0]
 
     rotation_matrix = rotation.to_matrix().detach().cpu()[0]
     return projection, rotation_matrix
-
-
-def _is_range_pair(value) -> bool:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return False
-    return all(isinstance(v, (int, float)) for v in value)
-
-
-def _normalize_residue_ranges_per_chain(residue_ranges_pdb):
-    if residue_ranges_pdb is None:
-        return None
-    if not isinstance(residue_ranges_pdb, (list, tuple)):
-        raise ValueError("residue_ranges_pdb must be a list.")
-    if len(residue_ranges_pdb) == 0:
-        return []
-    if _is_range_pair(residue_ranges_pdb[0]):
-        # Single-chain shorthand: [[start, end], [start, end], ...]
-        return [list(residue_ranges_pdb)]
-    return list(residue_ranges_pdb)
-
-
-def _build_residue_subset_mask(sequences, starting_residue_indices, residue_ranges_pdb):
-    ranges_per_chain = _normalize_residue_ranges_per_chain(residue_ranges_pdb)
-    if ranges_per_chain is None:
-        return None
-
-    full_sequences = [[d["sequence"]] * d["count"] for d in sequences]
-    full_sequences = [item for sublist in full_sequences for item in sublist]
-    sequence_types = [
-        sequence_type
-        for dictionary in sequences
-        for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
-    ]
-
-    regions_per_sequence = []
-    for chain_idx, sequence in enumerate(full_sequences):
-        chain_ranges = ranges_per_chain[chain_idx] if chain_idx < len(ranges_per_chain) else None
-        if chain_ranges is None:
-            regions_per_sequence.append([])
-            continue
-        if _is_range_pair(chain_ranges):
-            chain_ranges = [chain_ranges]
-
-        start_idx = 1
-        if starting_residue_indices is not None and chain_idx < len(starting_residue_indices):
-            start_idx = int(starting_residue_indices[chain_idx])
-
-        seq_len = len(sequence)
-        selected_residues = set()
-        for range_pair in chain_ranges:
-            if range_pair is None:
-                continue
-            if not _is_range_pair(range_pair):
-                raise ValueError(
-                    "Each residue range must be [start_pdb_id, end_pdb_id]. "
-                    f"Got: {range_pair!r}"
-                )
-            start_pdb, end_pdb = int(range_pair[0]), int(range_pair[1])
-            start_seq = max(1, start_pdb - start_idx + 1)
-            end_seq = min(seq_len, end_pdb - start_idx + 1)
-            if start_seq <= end_seq:
-                selected_residues.update(range(start_seq, end_seq + 1))
-        regions_per_sequence.append(sorted(selected_residues))
-
-    if not any(len(r) > 0 for r in regions_per_sequence):
-        raise ValueError(
-            "residue_ranges_pdb produced an empty residue selection. "
-            "Check PDB numbering and ranges."
-        )
-
-    return create_atom_mask(
-        full_sequences,
-        regions_per_sequence,
-        sequence_types=sequence_types,
-    )
 
 
 def _load_sequences_from_config(config_path: str):
@@ -500,7 +320,8 @@ def _load_sequences_from_config(config_path: str):
     chains_to_read = cfg["protein"].get("chains_to_use")
     cryoimage_cfg = cfg.get("loss_function", {}).get("cryoimage_loss_function", {})
     residue_ranges_pdb = cryoimage_cfg.get("residue_ranges_pdb")
-    return sequences, chains_to_read, residue_ranges_pdb
+    bfactor_override = cryoimage_cfg.get("bfactor_override")
+    return sequences, chains_to_read, residue_ranges_pdb, bfactor_override
 
 
 def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: torch.device, residue_ranges_pdb=None):
@@ -516,8 +337,18 @@ def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: t
     )
     coords, mask, bfactors, elements, starting_residue_indices = load_result
     mask = mask.to(dtype=torch.bool)
-    residue_subset_mask = _build_residue_subset_mask(
-        sequences=sequences,
+
+    full_sequences = [[d["sequence"]] * d["count"] for d in sequences]
+    full_sequences = [item for sublist in full_sequences for item in sublist]
+    sequence_types = [
+        sequence_type
+        for dictionary in sequences
+        for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
+    ]
+
+    residue_subset_mask = build_residue_subset_mask(
+        full_sequences=full_sequences,
+        sequence_types=sequence_types,
         starting_residue_indices=starting_residue_indices,
         residue_ranges_pdb=residue_ranges_pdb,
     )
@@ -547,6 +378,7 @@ def _generate_dataset_for_pdb(
     sequences=None,
     chains_to_read=None,
     residue_ranges_pdb=None,
+    config_bfactor_override: float | None = None,
 ) -> None:
     if not pdb_path.exists():
         raise FileNotFoundError(f"PDB not found: {pdb_path}")
@@ -562,13 +394,16 @@ def _generate_dataset_for_pdb(
     else:
         atom_stack = AtomStack.from_pdb_file(str(pdb_path), device=device)
 
-    _ensure_bfactors(atom_stack, args.bfactor, args.atomic_radius)
+    effective_bfactor_override = args.bfactor
+    if effective_bfactor_override is None:
+        effective_bfactor_override = config_bfactor_override
+    _ensure_bfactors(atom_stack, effective_bfactor_override, args.atomic_radius)
 
     voxel_size = args.voxel_size
     if voxel_size is None:
         voxel_size = args.resolution / 2.0
 
-    lattice, lattice_meta, center = _prepare_lattice(
+    lattice, lattice_meta, center = prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=voxel_size,
         padding=args.padding,
@@ -588,7 +423,7 @@ def _generate_dataset_for_pdb(
             )
 
     grid_dims = tuple(lattice.grid_dimensions.tolist())
-    proj_shape = _projection_shape(grid_dims, axis)
+    proj_shape = projection_shape(grid_dims, axis)
 
     projections = torch.empty(
         (args.num_rotations, proj_shape[0], proj_shape[1]),
@@ -601,15 +436,14 @@ def _generate_dataset_for_pdb(
         device="cpu",
     )
 
-    fast_solver = None
-    if args.use_fast_solver:
-        fast_solver = setup_fast_esp_solver(
-            atom_stack,
-            lattice,
-            per_voxel_averaging=True,
-            use_checkpointing=False,
-            use_autocast=False,
-        )
+    fast_renderer = CryoImageRenderer.from_atom_stack(
+        atom_stack=atom_stack,
+        lattice=lattice,
+        projection_axis=axis,
+        collapse_projection_axis=args.collapse_projection_axis,
+        use_checkpointing=False,
+        use_autocast=False,
+    )
 
     rotation_iter = _progress(
         range(args.num_rotations),
@@ -623,10 +457,8 @@ def _generate_dataset_for_pdb(
             lattice=lattice,
             projection_axis=axis,
             collapse_projection_axis=args.collapse_projection_axis,
-            atom_batch_size=args.atom_batch_size,
             center=center,
-            use_fast_solver=args.use_fast_solver,
-            fast_solver=fast_solver,
+            fast_renderer=fast_renderer,
         )
         projections[idx] = projection.detach().cpu()
         rotations[idx] = rotation_matrix
@@ -635,7 +467,7 @@ def _generate_dataset_for_pdb(
             if (idx + 1) % args.clear_cache_every == 0:
                 torch.cuda.empty_cache()
 
-    pdb_id = pdb_path.stem
+    pdb_id = _canonical_output_pdb_id(pdb_path)
     out_dir = Path(args.out_dir)
     out_name = f"{pdb_id}_esp_projections_{args.num_rotations}.{args.output_format}"
     output_path = out_dir / out_name
@@ -647,8 +479,7 @@ def _generate_dataset_for_pdb(
         "projection_axis": args.projection_axis,
         "voxel_size": voxel_size,
         "resolution": args.resolution,
-        "atom_batch_size": args.atom_batch_size,
-        "bfactor_override": args.bfactor,
+        "bfactor_override": effective_bfactor_override,
         "atomic_radius": args.atomic_radius,
         "device": str(device),
         "lattice": lattice_meta,
@@ -679,8 +510,9 @@ def main() -> None:
     sequences = None
     chains_to_read = None
     residue_ranges_pdb = None
+    config_bfactor_override = None
     if args.config:
-        sequences, chains_to_read, residue_ranges_pdb = _load_sequences_from_config(args.config)
+        sequences, chains_to_read, residue_ranges_pdb, config_bfactor_override = _load_sequences_from_config(args.config)
 
     for pdb_path in pdb_paths:
         _generate_dataset_for_pdb(
@@ -690,6 +522,7 @@ def main() -> None:
             sequences=sequences,
             chains_to_read=chains_to_read,
             residue_ranges_pdb=residue_ranges_pdb,
+            config_bfactor_override=config_bfactor_override,
         )
 
 

@@ -81,7 +81,7 @@ def test_download_pdb_writes_file(monkeypatch, tmp_path):
 def test_main_dispatches_to_generate(monkeypatch, tmp_path):
     calls = []
 
-    def fake_generate(pdb_path, _args, _device):
+    def fake_generate(pdb_path, _args, _device, **_kwargs):
         calls.append(pdb_path)
 
     def fake_download(pdb_id, cache_dir):
@@ -100,6 +100,7 @@ def test_main_dispatches_to_generate(monkeypatch, tmp_path):
         out_dir=str(tmp_path / "out"),
         device="cpu",
         seed=0,
+        config=None,
     )
 
     monkeypatch.setattr(dataset_gen, "_parse_args", lambda: args)
@@ -161,7 +162,6 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
         sublattice_radius=2.0,
         projection_axis="z",
         collapse_projection_axis=True,
-        atom_batch_size=32,
         bfactor=None,
         atomic_radius=0.5,
         output_format="pt",
@@ -172,7 +172,7 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
 
     dataset_gen._generate_dataset_for_pdb(pdb_path, args, torch.device("cpu"))
 
-    output_path = Path(args.out_dir) / "7t54_esp_projections_1.pt"
+    output_path = Path(args.out_dir) / "7T54_esp_projections_1.pt"
     assert output_path.exists()
 
     data = torch.load(output_path)
@@ -183,6 +183,11 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
 
     meta_path = output_path.with_suffix(".json")
     assert meta_path.exists()
+
+
+def test_canonical_output_pdb_id_is_uppercase():
+    assert dataset_gen._canonical_output_pdb_id(Path("7t54.pdb")) == "7T54"
+    assert dataset_gen._canonical_output_pdb_id(Path("7T55.pdb")) == "7T55"
 
 
 def test_prepare_lattice_collapses_axis(monkeypatch):
@@ -214,7 +219,7 @@ def test_prepare_lattice_collapses_axis(monkeypatch):
     )
 
     atom_stack = dataset_gen.AtomStack.from_pdb_file(str(pdb_path), device="cpu")
-    lattice, meta, _ = dataset_gen._prepare_lattice(
+    lattice, meta, _ = dataset_gen.prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=8.0,
         padding=5.0,
@@ -246,7 +251,7 @@ def test_collapsed_projection_matches_full_sum():
     sublattice_radius = 10.0
     axis = 2
 
-    lattice_full, _, center = dataset_gen._prepare_lattice(
+    lattice_full, _, center = dataset_gen.prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=voxel_size,
         padding=padding,
@@ -255,7 +260,7 @@ def test_collapsed_projection_matches_full_sum():
         collapse_projection_axis=False,
         device=torch.device("cpu"),
     )
-    lattice_collapsed, _, _ = dataset_gen._prepare_lattice(
+    lattice_collapsed, _, _ = dataset_gen.prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=voxel_size,
         padding=padding,
@@ -271,7 +276,6 @@ def test_collapsed_projection_matches_full_sum():
         lattice=lattice_full,
         projection_axis=axis,
         collapse_projection_axis=False,
-        atom_batch_size=32,
         center=center,
         rotation=rotation,
     )
@@ -280,7 +284,6 @@ def test_collapsed_projection_matches_full_sum():
         lattice=lattice_collapsed,
         projection_axis=axis,
         collapse_projection_axis=True,
-        atom_batch_size=32,
         center=center,
         rotation=rotation,
     )
