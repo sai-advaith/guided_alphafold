@@ -22,7 +22,7 @@ from src.utils.io import (
     merge_multiple_structures,
     alignment_mask_by_chain,
 )
-from src.utils.non_diffusion_model_manager import ProtenixModelManager
+from src.utils.non_diffusion_model_manager import ProtenixModelManager, MSA
 from src.utils.non_diffusion_model_manager import save_structure_full
 from src.utils.phenix_manager import PhenixManager
 from src.losses import * 
@@ -732,21 +732,386 @@ class ExperimentManager:
         # Default behavior: no per-chain constants, return scalar
         return self._get_step_based_scale_factor(guidance_config, step_idx)
 
-    def run_full_diffusion_process(self, latents):
-        structures = latents.clone()
-
+    def _get_diffusion_schedule(self):
+        """
+        Build the diffusion schedule.
+        Returns:
+            schedule (list[int]): diffusion indices visited at each loop step
+            total_steps (int): number of loop iterations
+        """
         N = self.config.model_manager.diffusion_N
         if self.config.general.recycle_structures.should_recycle:
             A = self.config.general.recycle_structures.recycle_connection[0]
             B = self.config.general.recycle_structures.recycle_connection[1]
             R = self.config.general.recycle_structures.recycle_n_times
-            
             total_steps = B + (R + 1) * (A - B) + (N - A) - 1
-            steps_generator = tqdm(range(total_steps), "running diffusion process")
-            schedule = list(range(0,B)) + (R+1)*list(range(B,A)) + list(range(A,N))
+            schedule = list(range(0, B)) + (R + 1) * list(range(B, A)) + list(range(A, N))
         else:
-            steps_generator = tqdm(range(self.config.model_manager.diffusion_N), "running diffusion process")
             schedule = list(range(N))
+            total_steps = len(schedule)
+        return schedule, total_steps
+
+    def _get_msa_optimization_config(self):
+        cfg = getattr(self.config, "msa_optimization_parameters", None)
+        if cfg is None:
+            return {
+                "enabled": False,
+                "outer_diffusion_steps": 1,
+                "msa_optimization_steps": 1,
+                "learning_rate": 1e-3,
+                "max_grad_norm": None,
+                "optimize_s_inputs": False,
+                "optimize_s": True,
+                "optimize_z": True,
+                "save_msa_every_n_steps": 0,
+                "freeze_msa_in_last_outer_iteration": True,
+                "early_stopping": {
+                    "enabled": False,
+                    "min_diffusion_step": 0,
+                    "patience": 0,
+                    "min_delta": 0.0,
+                    "ema_alpha": 0.2,
+                    "use_smoothed_loss": True,
+                },
+            }
+
+        max_grad_norm = getattr(cfg, "max_grad_norm", None)
+        max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
+        early_stopping_cfg = getattr(cfg, "early_stopping", None)
+        if early_stopping_cfg is None:
+            early_stopping = {
+                "enabled": False,
+                "min_diffusion_step": 0,
+                "patience": 0,
+                "min_delta": 0.0,
+                "ema_alpha": 0.2,
+                "use_smoothed_loss": True,
+            }
+        else:
+            ema_alpha = float(getattr(early_stopping_cfg, "ema_alpha", 0.2))
+            ema_alpha = min(max(ema_alpha, 1e-6), 1.0)
+            early_stopping = {
+                "enabled": bool(getattr(early_stopping_cfg, "enabled", False)),
+                "min_diffusion_step": max(0, int(getattr(early_stopping_cfg, "min_diffusion_step", 0))),
+                "patience": max(0, int(getattr(early_stopping_cfg, "patience", 0))),
+                "min_delta": float(getattr(early_stopping_cfg, "min_delta", 0.0)),
+                "ema_alpha": ema_alpha,
+                "use_smoothed_loss": bool(getattr(early_stopping_cfg, "use_smoothed_loss", True)),
+            }
+        return {
+            "enabled": bool(getattr(cfg, "enabled", False)),
+            "outer_diffusion_steps": max(1, int(getattr(cfg, "outer_diffusion_steps", 1))),
+            "msa_optimization_steps": max(1, int(getattr(cfg, "msa_optimization_steps", 1))),
+            "learning_rate": float(getattr(cfg, "learning_rate", 1e-3)),
+            "max_grad_norm": max_grad_norm,
+            "optimize_s_inputs": bool(getattr(cfg, "optimize_s_inputs", False)),
+            "optimize_s": bool(getattr(cfg, "optimize_s", True)),
+            "optimize_z": bool(getattr(cfg, "optimize_z", True)),
+            "save_msa_every_n_steps": max(0, int(getattr(cfg, "save_msa_every_n_steps", 0))),
+            "freeze_msa_in_last_outer_iteration": bool(getattr(cfg, "freeze_msa_in_last_outer_iteration", True)),
+            "early_stopping": early_stopping,
+        }
+
+    def _initialize_optimized_msa(self, msa_opt_config):
+        init_msa = self.model_manager.msa
+        optimized_msa = MSA(
+            init_msa.s_inputs.clone().detach(),
+            init_msa.s.clone().detach(),
+            init_msa.z.clone().detach(),
+        )
+
+        optimized_msa.s_inputs.requires_grad = msa_opt_config["optimize_s_inputs"]
+        optimized_msa.s.requires_grad = msa_opt_config["optimize_s"]
+        optimized_msa.z.requires_grad = msa_opt_config["optimize_z"]
+
+        if len(optimized_msa.parameters()) == 0:
+            raise ValueError(
+                "MSA optimization enabled, but no trainable MSA tensors were selected. "
+                "Set at least one of optimize_s_inputs/optimize_s/optimize_z to true."
+            )
+        return optimized_msa
+
+    def _save_msa_snapshot(self, msa, outer_iteration, diffusion_step=None, suffix=None):
+        snapshot_directory = os.path.join(self.experiment_save_dir, "msa_optimization")
+        os.makedirs(snapshot_directory, exist_ok=True)
+
+        file_name = f"msa_outer_{outer_iteration}"
+        if diffusion_step is not None:
+            file_name += f"_step_{diffusion_step}"
+        if suffix is not None and str(suffix) != "":
+            file_name += f"_{suffix}"
+        file_name += ".pt"
+
+        snapshot_payload = {
+            "s_inputs": msa.s_inputs.clone().detach().cpu(),
+            "s_trunk": msa.s.clone().detach().cpu(),
+            "z_trunk": msa.z.clone().detach().cpu(),
+            "outer_iteration": outer_iteration,
+            "diffusion_step": diffusion_step,
+        }
+        torch.save(snapshot_payload, os.path.join(snapshot_directory, file_name))
+
+    def _run_full_diffusion_process_msa_optimized(
+        self,
+        latents,
+        optimized_msa,
+        msa_opt_config,
+        outer_iteration,
+        optimize_msa_latents=True,
+    ):
+        structures = latents.clone().detach()
+        schedule, total_steps = self._get_diffusion_schedule()
+        steps_generator = tqdm(
+            range(total_steps),
+            f"running diffusion process (outer {outer_iteration + 1}/{msa_opt_config['outer_diffusion_steps']})",
+        )
+
+        guidance_config = self.config.diffusion_process.guidance
+        normalize_gradients = self.config.diffusion_process.guidance.normalize_gradients
+        start_guidance_from = self.config.general.denoiser_time_index
+        diffusion_last_step = self.config.model_manager.diffusion_N - 1
+        diffusion_time_denominator = float(max(diffusion_last_step, 1))
+
+        original_requires_grad = (
+            optimized_msa.s_inputs.requires_grad,
+            optimized_msa.s.requires_grad,
+            optimized_msa.z.requires_grad,
+        )
+        if not optimize_msa_latents:
+            optimized_msa.requires_grad(False)
+
+        trainable_params = optimized_msa.parameters() if optimize_msa_latents else []
+        optimizer = torch.optim.Adam(trainable_params, lr=msa_opt_config["learning_rate"]) if optimize_msa_latents else None
+        save_msa_every_n_steps = msa_opt_config["save_msa_every_n_steps"]
+        inner_optimization_steps = msa_opt_config["msa_optimization_steps"] if optimize_msa_latents else 1
+
+        early_stopping_cfg = msa_opt_config["early_stopping"]
+        early_stopping_enabled = (
+            early_stopping_cfg["enabled"] and early_stopping_cfg["patience"] > 0
+        )
+        best_step_loss = float("inf")
+        smoothed_step_loss = None
+        non_improving_steps = 0
+        early_stopped = False
+        early_stop_at_step = None
+        best_structure = None
+        best_structure_step = None
+
+        try:
+            for (step, i) in zip(steps_generator, schedule):
+                should_apply_guidance = self.config.general.apply_diffusion_guidance and i > start_guidance_from
+                start_idx = schedule[step]
+                end_idx = schedule[step + 1] if step + 1 < len(schedule) else None
+
+                guidance_direction = None
+                wandb_log = {}
+                x_0_hat_transition = None
+                last_loss_value = None
+                grad_norm_s = None
+                grad_norm_z = None
+                grad_norm_s_inputs = None
+
+                if i != diffusion_last_step:
+                    noisy_structures = structures.clone().detach()
+                    if should_apply_guidance:
+                        noisy_structures.requires_grad = True
+
+                    for msa_optimization_step in range(inner_optimization_steps):
+                        if optimizer is not None:
+                            optimizer.zero_grad(set_to_none=True)
+                        if noisy_structures.grad is not None:
+                            noisy_structures.grad = None
+
+                        x_0_hat = self.model_manager.get_x_0_hat_from_x_noisy(
+                            noisy_structures,
+                            start_index=i,
+                            inplace_safe=False,
+                            msa=optimized_msa,
+                        )
+                        x_0_hat = self.loss_function.pre_optimization_step(x_0_hat, i=i, step=step)
+                        loss_value, losses, new_x_0_hat = self.loss_function(
+                            x_0_hat,
+                            i / diffusion_time_denominator,
+                            structures=noisy_structures,
+                            i=i,
+                            step=step,
+                        )
+
+                        if new_x_0_hat is not None:
+                            x_0_hat = new_x_0_hat
+                        x_0_hat = self.loss_function.post_optimization_step(x_0_hat)
+
+                        if should_apply_guidance or optimizer is not None:
+                            loss_value.backward()
+
+                        if should_apply_guidance:
+                            guidance_direction = (
+                                noisy_structures.grad.detach().clone() if noisy_structures.grad is not None else None
+                            )
+
+                        if optimizer is not None:
+                            if optimized_msa.s.grad is not None:
+                                grad_norm_s = optimized_msa.s.grad.norm().item()
+                            if optimized_msa.z.grad is not None:
+                                grad_norm_z = optimized_msa.z.grad.norm().item()
+                            if optimized_msa.s_inputs.grad is not None:
+                                grad_norm_s_inputs = optimized_msa.s_inputs.grad.norm().item()
+
+                            if msa_opt_config["max_grad_norm"] is not None:
+                                torch.nn.utils.clip_grad_norm_(trainable_params, msa_opt_config["max_grad_norm"])
+
+                            optimizer.step()
+
+                        x_0_hat_transition = x_0_hat.detach()
+                        last_loss_value = loss_value.detach()
+                        wandb_log = self.loss_function.wandb_log(x_0_hat)
+
+                    if last_loss_value is not None:
+                        steps_generator.set_description(
+                            f"outer {outer_iteration + 1}, diffusion {i}, loss={last_loss_value.item():.5f}"
+                        )
+                else:
+                    with torch.no_grad():
+                        x_0_hat_transition = self.model_manager.get_x_0_hat_from_x_noisy(
+                            structures,
+                            start_index=i,
+                            inplace_safe=False,
+                            msa=optimized_msa,
+                        )
+
+                structures_gradient_norm = self._get_guidance_scale_factor(guidance_config, step)
+                structures = self.model_manager.get_x_t_from_x_0_hat(
+                    structures,
+                    x_0_hat_transition,
+                    start_idx,
+                    end_idx,
+                    guidance_direction=guidance_direction,
+                    step_size=self.config.diffusion_process.guidance.step_size,
+                    normalize_gradients=normalize_gradients,
+                    structures_gradient_norm=structures_gradient_norm,
+                    guidance_scale_gradually_increase=self.config.diffusion_process.guidance.guidance_scale_gradually_increase,
+                )
+
+                if i < diffusion_last_step:
+                    structures = self.model_manager.get_x_noisy(structures, start_index=start_idx, end_index=end_idx)
+
+                current_step_loss = None
+                if last_loss_value is not None:
+                    current_step_loss = last_loss_value.item()
+                    if smoothed_step_loss is None:
+                        smoothed_step_loss = current_step_loss
+                    else:
+                        alpha = early_stopping_cfg["ema_alpha"]
+                        smoothed_step_loss = alpha * current_step_loss + (1.0 - alpha) * smoothed_step_loss
+
+                if wandb_log is not None and self.config.wandb.login_key is not None:
+                    if current_step_loss is not None:
+                        wandb_log["msa_optimization/loss"] = current_step_loss
+                        wandb_log["msa_optimization/loss_smoothed"] = smoothed_step_loss
+                        wandb_log["msa_optimization/inner_steps"] = inner_optimization_steps
+                    wandb_log["msa_optimization/outer_iteration"] = outer_iteration
+                    wandb_log["msa_optimization/diffusion_step"] = i
+                    wandb_log["msa_optimization/learning_rate"] = msa_opt_config["learning_rate"]
+                    wandb_log["msa_optimization/msa_update_enabled"] = float(optimize_msa_latents)
+                    if grad_norm_s is not None:
+                        wandb_log["msa_optimization/grad_norm_s"] = grad_norm_s
+                    if grad_norm_z is not None:
+                        wandb_log["msa_optimization/grad_norm_z"] = grad_norm_z
+                    if grad_norm_s_inputs is not None:
+                        wandb_log["msa_optimization/grad_norm_s_inputs"] = grad_norm_s_inputs
+                    wandb.log(wandb_log)
+
+                if save_msa_every_n_steps > 0 and ((step + 1) % save_msa_every_n_steps == 0):
+                    self._save_msa_snapshot(
+                        optimized_msa,
+                        outer_iteration=outer_iteration,
+                        diffusion_step=i,
+                    )
+
+                if early_stopping_enabled and current_step_loss is not None and i >= early_stopping_cfg["min_diffusion_step"]:
+                    stopping_loss = (
+                        smoothed_step_loss if early_stopping_cfg["use_smoothed_loss"] else current_step_loss
+                    )
+                    candidate_structure = (
+                        x_0_hat_transition.detach().clone() if x_0_hat_transition is not None else structures.detach().clone()
+                    )
+                    if stopping_loss < (best_step_loss - early_stopping_cfg["min_delta"]):
+                        best_step_loss = stopping_loss
+                        best_structure = candidate_structure
+                        best_structure_step = i
+                        non_improving_steps = 0
+                    else:
+                        non_improving_steps += 1
+                        if non_improving_steps >= early_stopping_cfg["patience"]:
+                            early_stopped = True
+                            early_stop_at_step = i
+                            if best_structure is not None:
+                                structures = best_structure.detach().clone()
+                            else:
+                                structures = candidate_structure
+                            if self.config.wandb.login_key is not None:
+                                wandb.log(
+                                    {
+                                        "msa_optimization/outer_iteration": outer_iteration,
+                                        "msa_optimization/early_stopped": 1.0,
+                                        "msa_optimization/early_stop_diffusion_step": i,
+                                        "msa_optimization/early_stop_stopping_loss": float(stopping_loss),
+                                        "msa_optimization/early_stop_best_diffusion_step": (
+                                            float(best_structure_step) if best_structure_step is not None else -1.0
+                                        ),
+                                        "msa_optimization/early_stop_best_stopping_loss": (
+                                            float(best_step_loss) if best_structure is not None else float(stopping_loss)
+                                        ),
+                                    }
+                                )
+                            break
+
+                structures = structures.detach().clone()
+        finally:
+            optimized_msa.s_inputs.requires_grad = original_requires_grad[0]
+            optimized_msa.s.requires_grad = original_requires_grad[1]
+            optimized_msa.z.requires_grad = original_requires_grad[2]
+
+        if early_stopped:
+            print(
+                f"Early stopped outer iteration {outer_iteration} at diffusion step {early_stop_at_step} "
+                f"(best_loss={best_step_loss:.5f}, best_step={best_structure_step})"
+            )
+        return structures
+
+    def run_msa_optimization_with_outer_loop(self):
+        msa_opt_config = self._get_msa_optimization_config()
+        optimized_msa = self._initialize_optimized_msa(msa_opt_config)
+
+        final_structures = None
+        if msa_opt_config["save_msa_every_n_steps"] > 0:
+            self._save_msa_snapshot(optimized_msa, outer_iteration=0, suffix="init")
+        for outer_iteration in range(msa_opt_config["outer_diffusion_steps"]):
+            latents = self.get_initial_latents()
+            is_last_outer = outer_iteration == (msa_opt_config["outer_diffusion_steps"] - 1)
+            optimize_msa_latents = not (
+                msa_opt_config["freeze_msa_in_last_outer_iteration"] and is_last_outer
+            )
+            final_structures = self._run_full_diffusion_process_msa_optimized(
+                latents,
+                optimized_msa,
+                msa_opt_config,
+                outer_iteration,
+                optimize_msa_latents=optimize_msa_latents,
+            )
+            if msa_opt_config["save_msa_every_n_steps"] > 0:
+                self._save_msa_snapshot(optimized_msa, outer_iteration=outer_iteration, suffix="final")
+
+        optimized_msa.detach()
+        optimized_msa.requires_grad(False)
+        self.model_manager.msa = optimized_msa
+        return final_structures
+
+    def run_full_diffusion_process(self, latents):
+        structures = latents.clone()
+
+        schedule, total_steps = self._get_diffusion_schedule()
+        steps_generator = tqdm(range(total_steps), "running diffusion process")
 
         guidance_config = self.config.diffusion_process.guidance
         normalize_gradients = self.config.diffusion_process.guidance.normalize_gradients
@@ -816,9 +1181,12 @@ class ExperimentManager:
         return structures
 
     def run(self):
-        latents = self.get_initial_latents()
-
-        structures = self.run_full_diffusion_process(latents)
+        msa_opt_config = self._get_msa_optimization_config()
+        if msa_opt_config["enabled"]:
+            structures = self.run_msa_optimization_with_outer_loop()
+        else:
+            latents = self.get_initial_latents()
+            structures = self.run_full_diffusion_process(latents)
         sub_folder_name = "diffusion_process"
         self.save_state(structures, self.config.protein.pdb_id[:4], os.path.join(self.experiment_save_dir, sub_folder_name))
 
