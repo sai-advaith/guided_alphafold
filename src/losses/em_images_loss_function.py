@@ -65,6 +65,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         image_blur_sigma_schedule: dict | list | None = None,
         residue_ranges_pdb: list | None = None,
         bfactor_override: float | None = None,
+        supervised_assignment_by_index: bool = True,
     ):
         self.device = torch.device(device)
         self.atom_batch_size = atom_batch_size
@@ -75,7 +76,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self._projection_log_pairs = log_projection_pairs
         self._projection_log_calls = 0
         self._projection_log_payload = None
-        self._fast_renderer: CryoImageRenderer | None = None
+        self._fast_renderers: list[CryoImageRenderer] = []
         self.max_rotations_per_batch = max_rotations_per_batch
         self.use_resolved_atoms_only = use_resolved_atoms_only
         self.normalize_projections = normalize_projections
@@ -100,6 +101,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.image_blur_sigma_schedule = image_blur_sigma_schedule
         self.residue_ranges_pdb = residue_ranges_pdb
         self.bfactor_override = None if bfactor_override is None else float(bfactor_override)
+        self.supervised_assignment_by_index = bool(supervised_assignment_by_index)
         self._current_image_blur_sigma: float | None = None
         self._blur_kernel_cache: dict[tuple, torch.Tensor] = {}
         self._ot_loss_function = SamplesLoss(
@@ -186,6 +188,9 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             self.reference_structures.append(ref)
 
         self.last_loss_value = None
+        self.last_loss_per_conformation: dict[int, float] = {}
+        self.last_rmsd_per_conformation: dict[int, float] = {}
+        self.last_cosine_similarity_per_conformation: dict[int, float] = {}
         self._last_projection_log_step = None
         self._setup_fast_solver()
 
@@ -535,68 +540,60 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
                 f"Got {self.dataset.num_conformations} and {len(self.reference_structures)}."
             )
 
-        def _renderer_compat_key(conformation: dict[str, Any]) -> tuple:
-            lattice = conformation["lattice"]
-            return (
-                tuple(int(x) for x in lattice.grid_dimensions.tolist()),
-                tuple(float(x) for x in lattice.voxel_sizes_in_A.tolist()),
-                int(conformation["projection_axis"]),
-                bool(conformation["collapse_projection_axis"]),
-            )
-
-        dataset0 = self.dataset.get_conformation(0)
-        base_key = _renderer_compat_key(dataset0)
-        for dataset_idx in range(1, self.dataset.num_conformations):
+        self._fast_renderers = []
+        for dataset_idx, reference in enumerate(self.reference_structures):
             conformation = self.dataset.get_conformation(dataset_idx)
-            key = _renderer_compat_key(conformation)
-            if key != base_key:
-                raise ValueError(
-                    "Single-renderer mode requires all datasets to share lattice/projection settings. "
-                    f"Dataset 0 key={base_key}, dataset {dataset_idx} key={key}."
+            coords = reference["coords"]
+            atomic_numbers = reference["atomic_numbers"]
+            bfactors = reference["bfactors"]
+            resolved_mask = reference.get("render_mask")
+
+            if resolved_mask is not None:
+                coords, atomic_numbers, bfactors = CryoImageRenderer.apply_atom_mask(
+                    coords, atomic_numbers, bfactors, resolved_mask
+                )
+            if atomic_numbers is None or bfactors is None:
+                raise RuntimeError(
+                    f"Reference structure {dataset_idx} is missing atomic_numbers or bfactors for rendering."
                 )
 
-        reference0 = self.reference_structures[0]
-        coords = reference0["coords"]
-        atomic_numbers = reference0["atomic_numbers"]
-        bfactors = reference0["bfactors"]
-        resolved_mask = reference0.get("render_mask")
-
-        if resolved_mask is not None:
-            coords, atomic_numbers, bfactors = CryoImageRenderer.apply_atom_mask(
-                coords, atomic_numbers, bfactors, resolved_mask
+            renderer = CryoImageRenderer.from_coords_and_atomic_numbers(
+                coords=coords,
+                atomic_numbers=atomic_numbers,
+                bfactors=bfactors,
+                lattice=conformation["lattice"],
+                projection_axis=int(conformation["projection_axis"]),
+                collapse_projection_axis=bool(conformation["collapse_projection_axis"]),
+                device=self.device,
+                use_checkpointing=False,
+                use_autocast=False,
             )
-        if atomic_numbers is None or bfactors is None:
-            raise RuntimeError("Reference structure is missing atomic_numbers or bfactors for rendering.")
-
-        self._fast_renderer = CryoImageRenderer.from_coords_and_atomic_numbers(
-            coords=coords,
-            atomic_numbers=atomic_numbers,
-            bfactors=bfactors,
-            lattice=dataset0["lattice"],
-            projection_axis=int(dataset0["projection_axis"]),
-            collapse_projection_axis=bool(dataset0["collapse_projection_axis"]),
-            device=self.device,
-            use_checkpointing=False,
-            use_autocast=False,
-        )
+            self._fast_renderers.append(renderer)
 
     def _render_all_rotations(
         self,
+        conformation_index: int,
         coords: torch.Tensor,
         atomic_numbers: torch.Tensor,
         bfactors: torch.Tensor,
         rotations: torch.Tensor,
         resolved_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self._fast_renderer is None:
-            raise RuntimeError("Fast renderer was not initialized.")
+        if not self._fast_renderers:
+            raise RuntimeError("Fast renderers were not initialized.")
+        if not (0 <= conformation_index < len(self._fast_renderers)):
+            raise IndexError(
+                f"Invalid conformation_index={conformation_index}; "
+                f"expected [0, {len(self._fast_renderers) - 1}]"
+            )
+        renderer = self._fast_renderers[conformation_index]
         if resolved_mask is not None:
             coords, atomic_numbers, bfactors = CryoImageRenderer.apply_atom_mask(
                 coords, atomic_numbers, bfactors, resolved_mask
             )
         if atomic_numbers is None or bfactors is None:
             raise RuntimeError("Atomic numbers and bfactors are required for projection rendering.")
-        return self._fast_renderer.render_all_rotations_from_coords(
+        return renderer.render_all_rotations_from_coords(
             coords=coords,
             atomic_numbers=atomic_numbers,
             bfactors=bfactors,
@@ -637,23 +634,41 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
     def __call__(self, x_0_hat: torch.Tensor, time, structures=None, i=None, step=None):
         # For multiple conformations, compute loss per dataset and average.
         losses = []
+        self.last_loss_per_conformation = {}
+        self.last_rmsd_per_conformation = {}
+        self.last_cosine_similarity_per_conformation = {}
         do_log = False
         if self._projection_log_every and self._projection_log_every > 0:
             self._projection_log_calls += 1
-            do_log = (self._projection_log_calls % self._projection_log_every) == 0
+            if step is not None:
+                do_log = (int(step) % self._projection_log_every) == 0
+            else:
+                # Fallback for callers that do not provide step: log first call, then every N calls.
+                do_log = ((self._projection_log_calls - 1) % self._projection_log_every) == 0
 
         # Update blur sigma based on schedule (if provided).
         self._current_image_blur_sigma = self._scheduled_blur_sigma(time=time, step=step, i=i)
-        if self._fast_renderer is None:
-            raise RuntimeError("Fast renderer is not initialized.")
+        if not self._fast_renderers:
+            raise RuntimeError("Fast renderers are not initialized.")
+        if self.supervised_assignment_by_index and x_0_hat.shape[0] < self.dataset.num_conformations:
+            raise ValueError(
+                "supervised_assignment_by_index requires batch size >= number of conformations. "
+                f"Got batch={x_0_hat.shape[0]}, conformations={self.dataset.num_conformations}."
+            )
 
         for dataset_idx, reference in enumerate(self.reference_structures):
             conformation = self.dataset.get_conformation(dataset_idx)
-            aligned = self._align_to_reference(x_0_hat, reference)
+            assigned_x_0_hat = (
+                x_0_hat[dataset_idx:dataset_idx + 1]
+                if self.supervised_assignment_by_index
+                else x_0_hat
+            )
+            aligned = self._align_to_reference(assigned_x_0_hat, reference)
             resolved_mask = reference.get("render_mask")
 
             gt = conformation["projections"]
             rendered = self._render_all_rotations(
+                conformation_index=dataset_idx,
                 coords=aligned,
                 atomic_numbers=reference["atomic_numbers"],
                 bfactors=reference["bfactors"],
@@ -670,6 +685,26 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
 
             loss = self._projection_loss(rendered, gt)
             losses.append(loss)
+            self.last_loss_per_conformation[dataset_idx] = float(loss.detach().item())
+
+            rmsd_mask = self.AF3_to_pdb_mask
+            subset_mask = reference.get("residue_subset_mask")
+            if subset_mask is not None:
+                rmsd_mask = rmsd_mask & subset_mask.to(self.device)
+            if int(rmsd_mask.sum().item()) > 0:
+                diff = aligned[:, rmsd_mask, :] - reference["coords"][rmsd_mask, :].unsqueeze(0)
+            else:
+                diff = aligned - reference["coords"].unsqueeze(0)
+            self.last_rmsd_per_conformation[dataset_idx] = float(
+                diff.square().sum(dim=-1).mean().sqrt().detach().item()
+            )
+
+            rendered_flat = rendered.reshape(rendered.shape[0], -1)
+            gt_flat = gt.reshape(gt.shape[0], -1)
+            cosine_similarity = F.cosine_similarity(rendered_flat, gt_flat, dim=1).mean()
+            self.last_cosine_similarity_per_conformation[dataset_idx] = float(
+                cosine_similarity.detach().item()
+            )
 
         loss = torch.stack(losses).mean()
         self.last_loss_value = loss.detach().item()
@@ -680,6 +715,22 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             "loss": self.last_loss_value,  # keep for MultiLossFunction common_loss
             "cryoimage/loss": self.last_loss_value,
         }
+        if self.last_rmsd_per_conformation:
+            log["cryoimage/rmsd_mean"] = float(
+                sum(self.last_rmsd_per_conformation.values()) / len(self.last_rmsd_per_conformation)
+            )
+        if self.last_cosine_similarity_per_conformation:
+            log["cryoimage/cosine_similarity_mean"] = float(
+                sum(self.last_cosine_similarity_per_conformation.values())
+                / len(self.last_cosine_similarity_per_conformation)
+            )
+        for idx, value in self.last_loss_per_conformation.items():
+            log[f"cryoimage/loss_conf_{idx}"] = float(value)
+        for idx, value in self.last_rmsd_per_conformation.items():
+            log[f"cryoimage/rmsd_conf_{idx}"] = float(value)
+        for idx, value in self.last_cosine_similarity_per_conformation.items():
+            log[f"cryoimage/cosine_similarity_conf_{idx}"] = float(value)
+        log["cryoimage/supervised_assignment_by_index"] = float(self.supervised_assignment_by_index)
         if self._current_image_blur_sigma is not None:
             log["cryoimage/blur_sigma"] = float(self._current_image_blur_sigma)
         payload = self._projection_log_payload

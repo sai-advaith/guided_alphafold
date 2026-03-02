@@ -13,6 +13,8 @@ class BondLengthLossFunction(AbstractLossFunction):
 
         self._last_bond_length_loss = None
         self._last_collision_loss = None
+        self._last_bond_length_loss_per_structure = None
+        self._last_collision_loss_per_structure = None
 
     def _initialize_topolgy_bonds(self):
         # bonds and bond types, target_atom[i] = indexes of atoms bonded to atom i, padded with -1
@@ -53,7 +55,9 @@ class BondLengthLossFunction(AbstractLossFunction):
     def bond_length_loss(self, atom_locations, threshold=0.2 , l=2):
         bond_lengths = (atom_locations[:, self._bonds[...,0]] - atom_locations[:, self._bonds[...,1]]).norm(dim=-1)
         bond_lengths_diff = ((bond_lengths - self._bond_lengths).abs() - threshold).relu()
-        return bond_lengths_diff.pow(l).sum() / atom_locations.shape[0]
+        per_structure = bond_lengths_diff.pow(l).sum(dim=1)
+        self._last_bond_length_loss_per_structure = per_structure.detach().cpu().tolist()
+        return per_structure.mean()
     
     def collision_loss(self, atom_locations, padding = 0.4):
     #def collision_loss(self, atom_locations, padding = -0.4):
@@ -67,8 +71,9 @@ class BondLengthLossFunction(AbstractLossFunction):
         #threshold_loss = (self._collision_distances + padding - distances).max(dim=0)[0].relu()
         # redone to take all the collisions and not just the worst of a pair per structure in the ensemble
         self.last_thresholds = (self._collision_distances + padding - distances).relu()
-        threshold_loss = self.last_thresholds.sum(dim=(1,2)) 
-        return threshold_loss.sum() / atom_locations.shape[0] # average collision loss per structure
+        threshold_loss = self.last_thresholds.sum(dim=(1,2))
+        self._last_collision_loss_per_structure = threshold_loss.detach().cpu().tolist()
+        return threshold_loss.mean() # average collision loss per structure
     
     def get_bond_loss(self, atom_locations):
         bond_length_loss = self.bond_length_loss(atom_locations)
@@ -85,10 +90,19 @@ class BondLengthLossFunction(AbstractLossFunction):
         return self.get_bond_loss(x_0_hat), None
     
     def wandb_log(self, x_0_hat):
-        return {
+        log = {
             "bond length loss": self._last_bond_length_loss, 
             "collision loss": self._last_collision_loss, # average collision loss per structure
             "normalized collision loss": self._last_collision_loss / x_0_hat.shape[1], # normalizing not only per number of structures but also what's the average collision per atom pair
             "max collision loss of an atom pair": self.last_thresholds.max().item(), # max collision loss of an atom pair
             "total bond loss": self._last_bond_length_loss + self._last_collision_loss
         }
+        if self._last_bond_length_loss_per_structure is not None:
+            for idx, value in enumerate(self._last_bond_length_loss_per_structure):
+                log[f"bond length loss/conf_{idx}"] = float(value)
+        if self._last_collision_loss_per_structure is not None:
+            for idx, value in enumerate(self._last_collision_loss_per_structure):
+                value = float(value)
+                log[f"collision loss/conf_{idx}"] = value
+                log[f"normalized collision loss/conf_{idx}"] = value / x_0_hat.shape[1]
+        return log

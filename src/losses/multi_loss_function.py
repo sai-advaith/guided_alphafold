@@ -19,9 +19,9 @@ class MultiLossFunction(AbstractLossFunction):
     def wandb_log(self, x_0_hat):
         wandb_logs = [loss_function.wandb_log(x_0_hat) for loss_function in self.loss_functions]
         common_loss = sum(
-            [loss_function.wandb_log(x_0_hat)["loss"] * weight 
-            for loss_function, weight in zip(self.loss_functions,self.weights) 
-            if "loss" in loss_function.wandb_log(x_0_hat) and loss_function.wandb_log(x_0_hat).get("loss") is not None]
+            log["loss"] * weight
+            for log, weight in zip(wandb_logs, self.weights)
+            if "loss" in log and log.get("loss") is not None
         )
         wandb_log = {}
         for log in wandb_logs:

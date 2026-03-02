@@ -1,5 +1,7 @@
 import torch
 import os
+import shutil
+import glob
 import wandb
 from tqdm import tqdm
 import json
@@ -53,8 +55,19 @@ class ExperimentManager:
         self.per_atom_normalization_constants = self._create_per_atom_normalization_constants()
 
 
-        if self.config.protein.assembly_identifier is not None:
-            self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.protein.pdb_id, self.config.protein.assembly_identifier)
+        is_cryoimage_run = "cryoimage" in self.config.loss_function.loss_function_type
+        simplify_output_paths = bool(
+            getattr(self.config.general, "simplify_output_paths", is_cryoimage_run)
+        )
+        if simplify_output_paths:
+            output_leaf = getattr(self.config.general, "output_name", self.config.general.name)
+            self.experiment_save_dir = os.path.join(self.config.general.output_folder, output_leaf)
+        elif self.config.protein.assembly_identifier is not None:
+            self.experiment_save_dir = os.path.join(
+                self.config.general.output_folder,
+                self.config.protein.pdb_id,
+                self.config.protein.assembly_identifier,
+            )
         else:
             self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.general.name)
 
@@ -203,6 +216,7 @@ class ExperimentManager:
                     ot_downsample=getattr(cryoimage_config, "ot_downsample", None),
                     residue_ranges_pdb=getattr(cryoimage_config, "residue_ranges_pdb", None),
                     bfactor_override=getattr(cryoimage_config, "bfactor_override", None),
+                    supervised_assignment_by_index=getattr(cryoimage_config, "supervised_assignment_by_index", True),
                 )
                 loss_functions.append(loss_function)
                 loss_weight = getattr(cryoimage_config, "weight", 1)
@@ -337,7 +351,8 @@ class ExperimentManager:
         
         has_frozen_atoms = getattr(self.config.protein, "should_concatenate_frozen_atoms", False)
         bond_length_loss_weight = getattr(self.config.loss_function, "bond_length_loss_weight", 0.0)
-        if "cryoesp" in self.config.loss_function.loss_function_type:
+        log_bond_length_metrics = getattr(self.config.loss_function, "log_bond_length_metrics", False)
+        if bond_length_loss_weight > 0 or log_bond_length_metrics:
             loss_functions.append(BondLengthLossFunction(
                 self.model_manager.atom_array if not has_frozen_atoms \
                     else self.model_manager.atom_array + self.model_manager.frozen_atoms_dict["insertable_array"],
@@ -405,6 +420,107 @@ class ExperimentManager:
                 else:
                     chain_names.append(None)
         return chain_names
+
+    def _get_cryoimage_sample_names(self, n_structures, default_prefix):
+        cryoimage_cfg = getattr(self.config.loss_function, "cryoimage_loss_function", None)
+        reference_pdbs = list(getattr(cryoimage_cfg, "reference_pdbs", []) or [])
+
+        names = []
+        used_names = set()
+        for idx in range(n_structures):
+            if idx < len(reference_pdbs):
+                base_name = os.path.splitext(os.path.basename(reference_pdbs[idx]))[0].upper()
+            else:
+                base_name = f"{default_prefix}_{idx}"
+
+            candidate = base_name
+            suffix = 1
+            while candidate in used_names:
+                candidate = f"{base_name}_{suffix}"
+                suffix += 1
+            used_names.add(candidate)
+            names.append(candidate)
+        return names
+
+    def _get_cryoimage_loss_object(self):
+        if hasattr(self.loss_function, "loss_functions"):
+            for loss_obj in self.loss_function.loss_functions:
+                if isinstance(loss_obj, CryoEM_Images_GuidanceLossFunction):
+                    return loss_obj
+            return None
+        if isinstance(self.loss_function, CryoEM_Images_GuidanceLossFunction):
+            return self.loss_function
+        return None
+
+    def _save_cryoimage_ground_truths(self, folder_path, sample_names):
+        cryoimage_cfg = getattr(self.config.loss_function, "cryoimage_loss_function", None)
+        reference_pdbs = list(getattr(cryoimage_cfg, "reference_pdbs", []) or [])
+        cryoimage_loss_obj = self._get_cryoimage_loss_object()
+
+        chain_names = self._get_chain_names_from_sequences_dict(
+            getattr(self.model_manager, "sequences_dictionary", None)
+        )
+
+        sample_mapping = []
+        for idx, sample_name in enumerate(sample_names):
+            predicted_file = f"{sample_name}.pdb"
+            gt_file = None
+
+            wrote_from_coordinates = False
+            if (
+                cryoimage_loss_obj is not None
+                and hasattr(cryoimage_loss_obj, "reference_structures")
+                and idx < len(cryoimage_loss_obj.reference_structures)
+            ):
+                reference = cryoimage_loss_obj.reference_structures[idx]
+                gt_file = f"ground_truth_from_coordinates_{sample_name}.pdb"
+                gt_path = os.path.join(folder_path, gt_file)
+
+                mask = reference.get("mask", None)
+                mask = None if mask is None else mask.to(torch.bool).detach().cpu()
+                bfactors = reference.get("bfactors", None)
+                bfactors = None if bfactors is None else bfactors.detach().cpu().numpy()
+                starting_residue_indices = reference.get("starting_residue_indices", None)
+
+                save_structure_full(
+                    structure=reference["coords"].detach().cpu(),
+                    full_sequences=self.model_manager.full_sequences,
+                    sequence_types=self.model_manager.sequence_types,
+                    atom_array=self.model_manager.atom_array,
+                    write_file_name=gt_path,
+                    bfactors=bfactors,
+                    atom_mask=mask,
+                    chain_names=chain_names,
+                    starting_residue_indices=starting_residue_indices,
+                )
+                wrote_from_coordinates = True
+
+                # Backward compatibility with prior naming in single-conformation workflows.
+                if idx == 0:
+                    legacy_gt_path = os.path.join(folder_path, "ground_truth_from_coordinates.pdb")
+                    shutil.copy2(gt_path, legacy_gt_path)
+
+            if not wrote_from_coordinates and idx < len(reference_pdbs):
+                source_gt_path = reference_pdbs[idx]
+                if os.path.exists(source_gt_path):
+                    gt_file = f"{sample_name}_gt.pdb"
+                    destination_gt_path = os.path.join(folder_path, gt_file)
+                    shutil.copy2(source_gt_path, destination_gt_path)
+                else:
+                    print(f"Warning: cryoimage ground truth PDB not found: {source_gt_path}")
+
+            sample_mapping.append(
+                {
+                    "batch_index": idx,
+                    "sample_name": sample_name,
+                    "predicted_file": predicted_file,
+                    "ground_truth_file": gt_file,
+                }
+            )
+
+        mapping_path = os.path.join(folder_path, "cryoimage_sample_mapping.json")
+        with open(mapping_path, "w") as f:
+            json.dump(sample_mapping, f, indent=2)
 
     def save_state(self, structures, name, folder_path):
         os.makedirs(folder_path, exist_ok=True)
@@ -524,15 +640,48 @@ class ExperimentManager:
                 getattr(self.model_manager, 'sequences_dictionary', None)
             )
             starting_residue_indices = getattr(self.model_manager, 'starting_residue_indices', None)
+            sample_names = self._get_cryoimage_sample_names(structures.shape[0], default_prefix=name)
+            cryoimage_loss_obj = self._get_cryoimage_loss_object()
 
-            for i in range(structures.shape[0]):
+            # Remove legacy indexed files (e.g. 7T54_0.pdb) from previous runs in this folder.
+            legacy_pattern = os.path.join(folder_path, f"{name}_*.pdb")
+            for legacy_path in glob.glob(legacy_pattern):
+                if os.path.basename(legacy_path).startswith("ground_truth_from_coordinates"):
+                    continue
+                try:
+                    os.remove(legacy_path)
+                except OSError:
+                    pass
+
+            structures_to_save = structures.detach().clone()
+            if (
+                cryoimage_loss_obj is not None
+                and hasattr(cryoimage_loss_obj, "reference_structures")
+            ):
+                for i in range(structures_to_save.shape[0]):
+                    if i < len(cryoimage_loss_obj.reference_structures):
+                        reference = cryoimage_loss_obj.reference_structures[i]
+                        with torch.no_grad():
+                            aligned_single = cryoimage_loss_obj._align_to_reference(
+                                structures_to_save[i:i + 1], reference
+                            )
+                        structures_to_save[i] = aligned_single[0].detach()
+
+            for i in range(structures_to_save.shape[0]):
                 save_structure_full(
-                    structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.sequence_types, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
+                    structures_to_save[i].cpu(),
+                    self.model_manager.full_sequences,
+                    self.model_manager.sequence_types,
+                    self.model_manager.atom_array,
+                    f"{folder_path}/{sample_names[i]}.pdb",
                     bfactors=None,
                     atom_mask=self.model_manager.resolved_pdb_to_full_mask.cpu(),  # Only save resolved atoms, filter out unresolved ones
                     chain_names=chain_names,
                     starting_residue_indices=starting_residue_indices  # Preserve original PDB residue numbering
                 )
+
+            # Copy ground-truth structures next to predictions for easier visual/metric comparison.
+            self._save_cryoimage_ground_truths(folder_path, sample_names)
         else:
             raise ValueError(f"The loss function type {self.config.loss_function.loss_function_type} is not a valid option")
 
@@ -756,6 +905,7 @@ class ExperimentManager:
         if cfg is None:
             return {
                 "enabled": False,
+                "per_conformation_latents": False,
                 "outer_diffusion_steps": 1,
                 "msa_optimization_steps": 1,
                 "learning_rate": 1e-3,
@@ -800,6 +950,7 @@ class ExperimentManager:
             }
         return {
             "enabled": bool(getattr(cfg, "enabled", False)),
+            "per_conformation_latents": bool(getattr(cfg, "per_conformation_latents", False)),
             "outer_diffusion_steps": max(1, int(getattr(cfg, "outer_diffusion_steps", 1))),
             "msa_optimization_steps": max(1, int(getattr(cfg, "msa_optimization_steps", 1))),
             "learning_rate": float(getattr(cfg, "learning_rate", 1e-3)),
@@ -812,19 +963,126 @@ class ExperimentManager:
             "early_stopping": early_stopping,
         }
 
-    def _initialize_optimized_msa(self, msa_opt_config):
-        init_msa = self.model_manager.msa
-        optimized_msa = MSA(
-            init_msa.s_inputs.clone().detach(),
-            init_msa.s.clone().detach(),
-            init_msa.z.clone().detach(),
+    def _iter_msa_objects(self, msa_obj):
+        if isinstance(msa_obj, (list, tuple)):
+            return list(msa_obj)
+        return [msa_obj]
+
+    def _create_trainable_msa_copy(self, template_msa, msa_opt_config):
+        msa_copy = MSA(
+            template_msa.s_inputs.clone().detach(),
+            template_msa.s.clone().detach(),
+            template_msa.z.clone().detach(),
+        )
+        msa_copy.s_inputs.requires_grad = msa_opt_config["optimize_s_inputs"]
+        msa_copy.s.requires_grad = msa_opt_config["optimize_s"]
+        msa_copy.z.requires_grad = msa_opt_config["optimize_z"]
+        return msa_copy
+
+    def _get_msa_trainable_params(self, msa_obj):
+        params = []
+        for msa_single in self._iter_msa_objects(msa_obj):
+            params.extend(msa_single.parameters())
+        return params
+
+    def _capture_msa_requires_grad(self, msa_obj):
+        return [
+            (
+                msa_single.s_inputs.requires_grad,
+                msa_single.s.requires_grad,
+                msa_single.z.requires_grad,
+            )
+            for msa_single in self._iter_msa_objects(msa_obj)
+        ]
+
+    def _restore_msa_requires_grad(self, msa_obj, requires_grad_state):
+        msa_objects = self._iter_msa_objects(msa_obj)
+        if len(msa_objects) != len(requires_grad_state):
+            raise ValueError(
+                f"Cannot restore MSA requires_grad state. "
+                f"Got {len(msa_objects)} MSA objects and {len(requires_grad_state)} state entries."
+            )
+        for msa_single, state in zip(msa_objects, requires_grad_state):
+            s_inputs_rg, s_rg, z_rg = state
+            msa_single.s_inputs.requires_grad = s_inputs_rg
+            msa_single.s.requires_grad = s_rg
+            msa_single.z.requires_grad = z_rg
+
+    def _set_msa_requires_grad(self, msa_obj, requires_grad):
+        for msa_single in self._iter_msa_objects(msa_obj):
+            msa_single.requires_grad(requires_grad)
+
+    def _predict_x_0_hat_with_msa(self, noisy_structures, start_index, optimized_msa):
+        msa_objects = self._iter_msa_objects(optimized_msa)
+        if len(msa_objects) == 1:
+            return self.model_manager.get_x_0_hat_from_x_noisy(
+                noisy_structures,
+                start_index=start_index,
+                inplace_safe=False,
+                msa=msa_objects[0],
+            )
+
+        if noisy_structures.shape[0] != len(msa_objects):
+            raise ValueError(
+                "Per-conformation MSA optimization requires one MSA latent set per batch item. "
+                f"Got batch={noisy_structures.shape[0]}, msa_sets={len(msa_objects)}."
+            )
+        batched_msa = MSA(
+            s_inputs=torch.stack([msa_single.s_inputs for msa_single in msa_objects], dim=0),
+            s=torch.stack([msa_single.s for msa_single in msa_objects], dim=0),
+            z=torch.stack([msa_single.z for msa_single in msa_objects], dim=0),
+        )
+        return self.model_manager.get_x_0_hat_from_x_noisy(
+            noisy_structures,
+            start_index=start_index,
+            inplace_safe=False,
+            msa=batched_msa,
         )
 
-        optimized_msa.s_inputs.requires_grad = msa_opt_config["optimize_s_inputs"]
-        optimized_msa.s.requires_grad = msa_opt_config["optimize_s"]
-        optimized_msa.z.requires_grad = msa_opt_config["optimize_z"]
+    def _collect_msa_grad_norms(self, msa_obj):
+        grad_norms = {}
+        s_norms, z_norms, s_inputs_norms = [], [], []
+        msa_objects = self._iter_msa_objects(msa_obj)
+        multiple_msas = len(msa_objects) > 1
 
-        if len(optimized_msa.parameters()) == 0:
+        for idx, msa_single in enumerate(msa_objects):
+            if msa_single.s.grad is not None:
+                grad_norm_value = msa_single.s.grad.norm().item()
+                s_norms.append(grad_norm_value)
+                if multiple_msas:
+                    grad_norms[f"grad_norm_s_conf_{idx}"] = grad_norm_value
+            if msa_single.z.grad is not None:
+                grad_norm_value = msa_single.z.grad.norm().item()
+                z_norms.append(grad_norm_value)
+                if multiple_msas:
+                    grad_norms[f"grad_norm_z_conf_{idx}"] = grad_norm_value
+            if msa_single.s_inputs.grad is not None:
+                grad_norm_value = msa_single.s_inputs.grad.norm().item()
+                s_inputs_norms.append(grad_norm_value)
+                if multiple_msas:
+                    grad_norms[f"grad_norm_s_inputs_conf_{idx}"] = grad_norm_value
+
+        if s_norms:
+            grad_norms["grad_norm_s"] = float(sum(s_norms) / len(s_norms))
+        if z_norms:
+            grad_norms["grad_norm_z"] = float(sum(z_norms) / len(z_norms))
+        if s_inputs_norms:
+            grad_norms["grad_norm_s_inputs"] = float(sum(s_inputs_norms) / len(s_inputs_norms))
+
+        return grad_norms
+
+    def _initialize_optimized_msa(self, msa_opt_config):
+        init_msa = self.model_manager.msa
+        if msa_opt_config["per_conformation_latents"]:
+            batch_size = int(self.config.general.batch_size)
+            optimized_msa = [
+                self._create_trainable_msa_copy(init_msa, msa_opt_config)
+                for _ in range(batch_size)
+            ]
+        else:
+            optimized_msa = self._create_trainable_msa_copy(init_msa, msa_opt_config)
+
+        if len(self._get_msa_trainable_params(optimized_msa)) == 0:
             raise ValueError(
                 "MSA optimization enabled, but no trainable MSA tensors were selected. "
                 "Set at least one of optimize_s_inputs/optimize_s/optimize_z to true."
@@ -842,13 +1100,31 @@ class ExperimentManager:
             file_name += f"_{suffix}"
         file_name += ".pt"
 
-        snapshot_payload = {
-            "s_inputs": msa.s_inputs.clone().detach().cpu(),
-            "s_trunk": msa.s.clone().detach().cpu(),
-            "z_trunk": msa.z.clone().detach().cpu(),
-            "outer_iteration": outer_iteration,
-            "diffusion_step": diffusion_step,
-        }
+        msa_objects = self._iter_msa_objects(msa)
+        if len(msa_objects) == 1:
+            snapshot_payload = {
+                "s_inputs": msa_objects[0].s_inputs.clone().detach().cpu(),
+                "s_trunk": msa_objects[0].s.clone().detach().cpu(),
+                "z_trunk": msa_objects[0].z.clone().detach().cpu(),
+                "outer_iteration": outer_iteration,
+                "diffusion_step": diffusion_step,
+                "per_conformation_latents": False,
+            }
+        else:
+            snapshot_payload = {
+                "s_inputs": torch.stack(
+                    [msa_single.s_inputs.clone().detach().cpu() for msa_single in msa_objects], dim=0
+                ),
+                "s_trunk": torch.stack(
+                    [msa_single.s.clone().detach().cpu() for msa_single in msa_objects], dim=0
+                ),
+                "z_trunk": torch.stack(
+                    [msa_single.z.clone().detach().cpu() for msa_single in msa_objects], dim=0
+                ),
+                "outer_iteration": outer_iteration,
+                "diffusion_step": diffusion_step,
+                "per_conformation_latents": True,
+            }
         torch.save(snapshot_payload, os.path.join(snapshot_directory, file_name))
 
     def _run_full_diffusion_process_msa_optimized(
@@ -872,15 +1148,11 @@ class ExperimentManager:
         diffusion_last_step = self.config.model_manager.diffusion_N - 1
         diffusion_time_denominator = float(max(diffusion_last_step, 1))
 
-        original_requires_grad = (
-            optimized_msa.s_inputs.requires_grad,
-            optimized_msa.s.requires_grad,
-            optimized_msa.z.requires_grad,
-        )
+        original_requires_grad = self._capture_msa_requires_grad(optimized_msa)
         if not optimize_msa_latents:
-            optimized_msa.requires_grad(False)
+            self._set_msa_requires_grad(optimized_msa, False)
 
-        trainable_params = optimized_msa.parameters() if optimize_msa_latents else []
+        trainable_params = self._get_msa_trainable_params(optimized_msa) if optimize_msa_latents else []
         optimizer = torch.optim.Adam(trainable_params, lr=msa_opt_config["learning_rate"]) if optimize_msa_latents else None
         save_msa_every_n_steps = msa_opt_config["save_msa_every_n_steps"]
         inner_optimization_steps = msa_opt_config["msa_optimization_steps"] if optimize_msa_latents else 1
@@ -907,9 +1179,7 @@ class ExperimentManager:
                 wandb_log = {}
                 x_0_hat_transition = None
                 last_loss_value = None
-                grad_norm_s = None
-                grad_norm_z = None
-                grad_norm_s_inputs = None
+                msa_grad_norms = {}
 
                 if i != diffusion_last_step:
                     noisy_structures = structures.clone().detach()
@@ -922,11 +1192,10 @@ class ExperimentManager:
                         if noisy_structures.grad is not None:
                             noisy_structures.grad = None
 
-                        x_0_hat = self.model_manager.get_x_0_hat_from_x_noisy(
+                        x_0_hat = self._predict_x_0_hat_with_msa(
                             noisy_structures,
                             start_index=i,
-                            inplace_safe=False,
-                            msa=optimized_msa,
+                            optimized_msa=optimized_msa,
                         )
                         x_0_hat = self.loss_function.pre_optimization_step(x_0_hat, i=i, step=step)
                         loss_value, losses, new_x_0_hat = self.loss_function(
@@ -950,12 +1219,7 @@ class ExperimentManager:
                             )
 
                         if optimizer is not None:
-                            if optimized_msa.s.grad is not None:
-                                grad_norm_s = optimized_msa.s.grad.norm().item()
-                            if optimized_msa.z.grad is not None:
-                                grad_norm_z = optimized_msa.z.grad.norm().item()
-                            if optimized_msa.s_inputs.grad is not None:
-                                grad_norm_s_inputs = optimized_msa.s_inputs.grad.norm().item()
+                            msa_grad_norms = self._collect_msa_grad_norms(optimized_msa)
 
                             if msa_opt_config["max_grad_norm"] is not None:
                                 torch.nn.utils.clip_grad_norm_(trainable_params, msa_opt_config["max_grad_norm"])
@@ -972,11 +1236,10 @@ class ExperimentManager:
                         )
                 else:
                     with torch.no_grad():
-                        x_0_hat_transition = self.model_manager.get_x_0_hat_from_x_noisy(
+                        x_0_hat_transition = self._predict_x_0_hat_with_msa(
                             structures,
                             start_index=i,
-                            inplace_safe=False,
-                            msa=optimized_msa,
+                            optimized_msa=optimized_msa,
                         )
 
                 structures_gradient_norm = self._get_guidance_scale_factor(guidance_config, step)
@@ -1013,12 +1276,8 @@ class ExperimentManager:
                     wandb_log["msa_optimization/diffusion_step"] = i
                     wandb_log["msa_optimization/learning_rate"] = msa_opt_config["learning_rate"]
                     wandb_log["msa_optimization/msa_update_enabled"] = float(optimize_msa_latents)
-                    if grad_norm_s is not None:
-                        wandb_log["msa_optimization/grad_norm_s"] = grad_norm_s
-                    if grad_norm_z is not None:
-                        wandb_log["msa_optimization/grad_norm_z"] = grad_norm_z
-                    if grad_norm_s_inputs is not None:
-                        wandb_log["msa_optimization/grad_norm_s_inputs"] = grad_norm_s_inputs
+                    for grad_key, grad_value in msa_grad_norms.items():
+                        wandb_log[f"msa_optimization/{grad_key}"] = grad_value
                     wandb.log(wandb_log)
 
                 if save_msa_every_n_steps > 0 and ((step + 1) % save_msa_every_n_steps == 0):
@@ -1068,9 +1327,7 @@ class ExperimentManager:
 
                 structures = structures.detach().clone()
         finally:
-            optimized_msa.s_inputs.requires_grad = original_requires_grad[0]
-            optimized_msa.s.requires_grad = original_requires_grad[1]
-            optimized_msa.z.requires_grad = original_requires_grad[2]
+            self._restore_msa_requires_grad(optimized_msa, original_requires_grad)
 
         if early_stopped:
             print(
@@ -1102,9 +1359,14 @@ class ExperimentManager:
             if msa_opt_config["save_msa_every_n_steps"] > 0:
                 self._save_msa_snapshot(optimized_msa, outer_iteration=outer_iteration, suffix="final")
 
-        optimized_msa.detach()
-        optimized_msa.requires_grad(False)
-        self.model_manager.msa = optimized_msa
+        for msa_single in self._iter_msa_objects(optimized_msa):
+            msa_single.detach()
+            msa_single.requires_grad(False)
+        if isinstance(optimized_msa, list):
+            self.model_manager.msa_per_conformation = optimized_msa
+            self.model_manager.msa = optimized_msa[0]
+        else:
+            self.model_manager.msa = optimized_msa
         return final_structures
 
     def run_full_diffusion_process(self, latents):
@@ -1187,8 +1449,19 @@ class ExperimentManager:
         else:
             latents = self.get_initial_latents()
             structures = self.run_full_diffusion_process(latents)
-        sub_folder_name = "diffusion_process"
-        self.save_state(structures, self.config.protein.pdb_id[:4], os.path.join(self.experiment_save_dir, sub_folder_name))
+        save_into_diffusion_subfolder = bool(
+            getattr(
+                self.config.general,
+                "save_into_diffusion_subfolder",
+                not ("cryoimage" in self.config.loss_function.loss_function_type),
+            )
+        )
+        output_folder = (
+            os.path.join(self.experiment_save_dir, "diffusion_process")
+            if save_into_diffusion_subfolder
+            else self.experiment_save_dir
+        )
+        self.save_state(structures, self.config.protein.pdb_id[:4], output_folder)
 
         # Density specific!
         if self.density_loss_function is not None:

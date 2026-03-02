@@ -109,12 +109,25 @@ class DiffusionConditioning(nn.Module):
                 - s (torch.Tensor): [..., N_sample, N_tokens, c_s]
                 - z (torch.Tensor): [..., N_tokens, N_tokens, c_z]
         """
+        n_sample = t_hat_noise_level.shape[-1]
+        has_per_sample_trunk = (
+            s_inputs.dim() == t_hat_noise_level.dim() + 2
+            and s_trunk.dim() == t_hat_noise_level.dim() + 2
+            and z_trunk.dim() == t_hat_noise_level.dim() + 3
+            and s_inputs.shape[-3] == n_sample
+            and s_trunk.shape[-3] == n_sample
+            and z_trunk.shape[-4] == n_sample
+        )
+        relpe = self.relpe(input_feature_dict)
+        if has_per_sample_trunk and relpe.dim() == (z_trunk.dim() - 1):
+            # Broadcast relative-position encodings across per-sample trunk axis.
+            relpe = expand_at_dim(relpe, dim=-4, n=n_sample)
         
         # Pair conditioning
         
         if inplace_safe:
             pair_z = torch.cat(
-                tensors=[z_trunk, self.relpe(input_feature_dict)], dim=-1
+                tensors=[z_trunk, relpe], dim=-1
             )  # [..., N_tokens, N_tokens, 2*c_z]
             pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
             pair_z += self.transition_z1(pair_z)
@@ -123,7 +136,7 @@ class DiffusionConditioning(nn.Module):
             def transition_block(z_trunk):
                 """Transition block for pair embeddings."""
                 pair_z = torch.cat(
-                    tensors=[z_trunk, self.relpe(input_feature_dict)], dim=-1
+                    tensors=[z_trunk, relpe], dim=-1
                 )  # [..., N_tokens, N_tokens, 2*c_z]
                 pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
                 pair_z = pair_z + self.transition_z1(pair_z)
@@ -146,11 +159,12 @@ class DiffusionConditioning(nn.Module):
             ).to(
                 single_s.dtype
             )  # [..., N_sample, c_in]
-            single_s = single_s.unsqueeze(dim=-3) + self.linear_no_bias_n(
-                self.layernorm_n(noise_n)
-            ).unsqueeze(
-                dim=-2
-            )  # [..., N_sample, N_tokens, c_s]
+            noise_proj = self.linear_no_bias_n(self.layernorm_n(noise_n))
+            if has_per_sample_trunk:
+                single_s = single_s + noise_proj.unsqueeze(dim=-2)
+            else:
+                single_s = single_s.unsqueeze(dim=-3) + noise_proj.unsqueeze(dim=-2)
+            # [..., N_sample, N_tokens, c_s]
 
             single_s += self.transition_s1(single_s)
             single_s += self.transition_s2(single_s)
@@ -161,9 +175,11 @@ class DiffusionConditioning(nn.Module):
                 noise_n = self.fourier_embedding(
                     t_hat_noise_level=torch.log(t_hat_noise_level / self.sigma_data) / 4
                 ).to(single_s.dtype)
-                single_s = single_s.unsqueeze(-3) + self.linear_no_bias_n(
-                    self.layernorm_n(noise_n)
-                ).unsqueeze(-2)
+                noise_proj = self.linear_no_bias_n(self.layernorm_n(noise_n))
+                if has_per_sample_trunk:
+                    single_s = single_s + noise_proj.unsqueeze(-2)
+                else:
+                    single_s = single_s.unsqueeze(-3) + noise_proj.unsqueeze(-2)
                 single_s = single_s + self.transition_s1(single_s)
                 single_s = single_s + self.transition_s2(single_s)
                 return single_s
@@ -425,13 +441,31 @@ class DiffusionModule(nn.Module):
                 inplace_safe=inplace_safe,
             )  # [..., N_sample, N_token, c_s], [..., N_token, N_token, c_z]
 
-        # Expand embeddings to match N_sample
-        s_trunk = expand_at_dim(
-            s_trunk, dim=-3, n=N_sample
-        )  # [..., N_sample, N_token, c_s]
-        z_pair = expand_at_dim(
-            z_pair, dim=-4, n=N_sample
-        )  # [..., N_sample, N_token, N_token, c_z]
+        # Expand embeddings to match N_sample when trunk inputs are shared across samples.
+        # If trunk embeddings are already per-sample, keep them as-is.
+        if s_trunk.dim() == r_noisy.dim():
+            if s_trunk.shape[-3] != N_sample:
+                raise ValueError(
+                    "Per-sample trunk embeddings must have shape [..., N_sample, N_token, c_s]. "
+                    f"Got s_trunk shape={tuple(s_trunk.shape)}, N_sample={N_sample}."
+                )
+            s_for_atom_encoder = s_trunk
+        else:
+            s_for_atom_encoder = expand_at_dim(
+                s_trunk, dim=-3, n=N_sample
+            )  # [..., N_sample, N_token, c_s]
+
+        if z_pair.dim() == (r_noisy.dim() + 1):
+            if z_pair.shape[-4] != N_sample:
+                raise ValueError(
+                    "Per-sample pair embeddings must have shape [..., N_sample, N_token, N_token, c_z]. "
+                    f"Got z_pair shape={tuple(z_pair.shape)}, N_sample={N_sample}."
+                )
+            z_for_atom_encoder = z_pair
+        else:
+            z_for_atom_encoder = expand_at_dim(
+                z_pair, dim=-4, n=N_sample
+            )  # [..., N_sample, N_token, N_token, c_z]
         # Fine-grained checkpoint for finetuning stage 2 (token num: 768) for avoiding OOM
         if blocks_per_ckpt and self.use_fine_grained_checkpoint:
             checkpoint_fn = get_checkpoint_fn()
@@ -439,8 +473,8 @@ class DiffusionModule(nn.Module):
                 self.atom_attention_encoder,
                 input_feature_dict,
                 r_noisy,
-                s_trunk,
-                z_pair,
+                s_for_atom_encoder,
+                z_for_atom_encoder,
                 inplace_safe,
                 chunk_size,
             )
@@ -449,8 +483,8 @@ class DiffusionModule(nn.Module):
             a_token, q_skip, c_skip, p_skip = self.atom_attention_encoder(
                 input_feature_dict=input_feature_dict,
                 r_l=r_noisy,
-                s=s_trunk,
-                z=z_pair,
+                s=s_for_atom_encoder,
+                z=z_for_atom_encoder,
                 inplace_safe=inplace_safe,
                 chunk_size=chunk_size,
             )
@@ -466,7 +500,7 @@ class DiffusionModule(nn.Module):
         a_token = self.diffusion_transformer(
             a=a_token,
             s=s_single,
-            z=z_pair,
+            z=z_for_atom_encoder,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
         )
