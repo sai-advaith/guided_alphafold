@@ -189,32 +189,9 @@ class ExperimentManager:
                     chains_to_read=getattr(cryoimage_config, "chains_to_read", self.config.protein.chains_to_use),
                     device=self.device,
                     should_align_to_chains=getattr(self.config.protein, "should_align_to_chains", None),
-                    atom_batch_size=getattr(cryoimage_config, "atom_batch_size", 1024),
-                    loss_reduction=getattr(cryoimage_config, "loss_reduction", "mean"),
-                    loss_type=getattr(cryoimage_config, "loss_type", "mse"),
-                    use_checkpointing=getattr(cryoimage_config, "use_checkpointing", False),
                     log_projection_every=getattr(cryoimage_config, "log_projection_every", 10),
                     log_projection_pairs=getattr(cryoimage_config, "log_projection_pairs", 3),
                     max_rotations_per_batch=getattr(cryoimage_config, "max_rotations_per_batch", None),
-                    normalize_projections=getattr(cryoimage_config, "normalize_projections", False),
-                    projection_normalization_eps=getattr(cryoimage_config, "projection_normalization_eps", 1e-6),
-                    image_blur_sigma=getattr(cryoimage_config, "image_blur_sigma", None),
-                    image_blur_kernel_size=getattr(cryoimage_config, "image_blur_kernel_size", None),
-                    image_blur_sigma_schedule=getattr(cryoimage_config, "image_blur_sigma_schedule", None),
-                    loss_topk=getattr(cryoimage_config, "loss_topk", None),
-                    fft_log_eps=getattr(cryoimage_config, "fft_log_eps", 1e-6),
-                    fft_bandpass_low=getattr(cryoimage_config, "fft_bandpass_low", None),
-                    fft_bandpass_high=getattr(cryoimage_config, "fft_bandpass_high", None),
-                    ncc_eps=getattr(cryoimage_config, "ncc_eps", 1e-6),
-                    ot_p=getattr(cryoimage_config, "ot_p", 1),
-                    ot_blur=getattr(cryoimage_config, "ot_blur", 0.5),
-                    ot_scaling=getattr(cryoimage_config, "ot_scaling", 0.9),
-                    ot_reach=getattr(cryoimage_config, "ot_reach", None),
-                    ot_backend=getattr(cryoimage_config, "ot_backend", "online"),
-                    ot_debias=getattr(cryoimage_config, "ot_debias", True),
-                    ot_eps=getattr(cryoimage_config, "ot_eps", 1e-6),
-                    ot_downsample=getattr(cryoimage_config, "ot_downsample", None),
-                    residue_ranges_pdb=getattr(cryoimage_config, "residue_ranges_pdb", None),
                     bfactor_override=getattr(cryoimage_config, "bfactor_override", None),
                     supervised_assignment_by_index=getattr(cryoimage_config, "supervised_assignment_by_index", True),
                 )
@@ -1400,10 +1377,9 @@ class ExperimentManager:
                 if should_apply_guidance:
                     # With gradients for backprop
                     loss_value, losses, new_x_0_hat = self.loss_function(x_0_hat, i / (self.config.model_manager.diffusion_N - 1), structures=structures, i=i, step=step)
-                    wandb_log = self.loss_function.wandb_log(x_0_hat)
                     if new_x_0_hat is not None:
-                        wandb_log = self.loss_function.wandb_log(new_x_0_hat)
                         x_0_hat = new_x_0_hat # TODO Vova: rethink the x_0_hat logic since now this change is pre-baked in the preoptimization step! 
+                    wandb_log = self.loss_function.wandb_log(x_0_hat)
                     loss_value.backward()
                     steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
                 
@@ -1414,10 +1390,9 @@ class ExperimentManager:
                     # Without gradients, just for logging
                     with torch.no_grad():
                         loss_value, losses, new_x_0_hat = self.loss_function(x_0_hat, i / (self.config.model_manager.diffusion_N - 1), structures=structures, i=i, step=step)
-                        wandb_log = self.loss_function.wandb_log(x_0_hat)
                         if new_x_0_hat is not None:
-                            wandb_log = self.loss_function.wandb_log(new_x_0_hat)
                             x_0_hat = new_x_0_hat
+                        wandb_log = self.loss_function.wandb_log(x_0_hat)
                         steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
                 
                 x_0_hat = self.loss_function.post_optimization_step(x_0_hat) 

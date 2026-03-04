@@ -251,7 +251,7 @@ def test_collapsed_projection_matches_full_sum():
     sublattice_radius = 10.0
     axis = 2
 
-    lattice_full, _, center = dataset_gen.prepare_lattice_from_atom_stack(
+    lattice_full, _, _ = dataset_gen.prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=voxel_size,
         padding=padding,
@@ -276,7 +276,6 @@ def test_collapsed_projection_matches_full_sum():
         lattice=lattice_full,
         projection_axis=axis,
         collapse_projection_axis=False,
-        center=center,
         rotation=rotation,
     )
     projection_collapsed, _ = dataset_gen._render_projection(
@@ -284,7 +283,6 @@ def test_collapsed_projection_matches_full_sum():
         lattice=lattice_collapsed,
         projection_axis=axis,
         collapse_projection_axis=True,
-        center=center,
         rotation=rotation,
     )
 

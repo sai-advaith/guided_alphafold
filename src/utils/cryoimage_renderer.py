@@ -435,7 +435,6 @@ class CryoImageRenderer:
         bfactors: torch.Tensor,
         rotations: torch.Tensor,
         max_rotations_per_batch: int | None = None,
-        center: torch.Tensor | None = None,
         occupancies: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if coords.ndim == 2:
@@ -450,15 +449,6 @@ class CryoImageRenderer:
             bfactors = bfactors.unsqueeze(-1)
         if bfactors.shape[0] == 1 and batch > 1:
             bfactors = bfactors.expand(batch, -1, -1)
-
-        if center is None:
-            center = coords.mean(dim=1, keepdim=True)
-        else:
-            if center.ndim == 1:
-                center = center.unsqueeze(0).unsqueeze(1)
-            elif center.ndim == 2:
-                center = center.unsqueeze(1)
-        coords_centered = coords - center
 
         atomic_numbers_for_solver = atomic_numbers.contiguous()
         if atomic_numbers_for_solver.ndim == 1:
@@ -481,14 +471,33 @@ class CryoImageRenderer:
                 )
 
         num_rots = int(rotations.shape[0])
-        max_rots = num_rots if max_rotations_per_batch is None or max_rotations_per_batch <= 0 else int(max_rotations_per_batch)
+        max_rots = (
+            num_rots
+            if max_rotations_per_batch is None or max_rotations_per_batch <= 0
+            else int(max_rotations_per_batch)
+        )
 
         projections = []
         for rot_start in range(0, num_rots, max_rots):
             rot_end = min(rot_start + max_rots, num_rots)
             rot_batch = rotations[rot_start:rot_end]
-            # Match cryoforward AtomStack.rotate convention: (x - c) @ R.T + c
-            coords_batch = torch.einsum("rji,bnj->rbni", rot_batch, coords_centered) + center.unsqueeze(0)
+            rot_count = int(rot_batch.shape[0])
+
+            # Keep rotation behavior consistent with cryoforward AtomStack.apply_rigid_transform.
+            coords_for_transform = coords.repeat(rot_count, 1, 1)
+            rotations_for_transform = rot_batch.repeat_interleave(batch, dim=0)
+
+            transform_stack = AtomStack.from_coords_and_atomic_numbers(
+                atom_coordinates=coords_for_transform,
+                atomic_numbers=atomic_numbers_for_solver,
+                device=coords.device,
+            )
+            coords_batch = transform_stack.apply_rigid_transform(
+                rotation=rotations_for_transform,
+                translation=None,
+                center=None,
+                copy=False,
+            ).atom_coordinates.reshape(rot_count, batch, coords.shape[1], 3)
 
             volumes = self._compute_batch_from_coords(
                 coords_batch,

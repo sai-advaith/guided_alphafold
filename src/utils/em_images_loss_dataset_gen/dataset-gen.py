@@ -24,7 +24,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.io import load_pdb_atom_locations_full
-from src.utils.residue_range_mask import build_residue_subset_mask
 
 try:
     from src.utils.cryoimage_renderer import (
@@ -277,7 +276,6 @@ def _render_projection(
     lattice: Lattice,
     projection_axis: int,
     collapse_projection_axis: bool,
-    center: torch.Tensor | None = None,
     rotation: Rotation | None = None,
     *,
     fast_renderer: CryoImageRenderer | None = None,
@@ -303,7 +301,6 @@ def _render_projection(
             bfactors=atom_stack.bfactors,
             rotations=rot_matrix,
             max_rotations_per_batch=1,
-            center=center,
             occupancies=atom_stack.occupancies,
         )[0]
 
@@ -340,21 +337,7 @@ def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: t
 
     full_sequences = [[d["sequence"]] * d["count"] for d in sequences]
     full_sequences = [item for sublist in full_sequences for item in sublist]
-    sequence_types = [
-        sequence_type
-        for dictionary in sequences
-        for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
-    ]
-
-    residue_subset_mask = build_residue_subset_mask(
-        full_sequences=full_sequences,
-        sequence_types=sequence_types,
-        starting_residue_indices=starting_residue_indices,
-        residue_ranges_pdb=residue_ranges_pdb,
-    )
-    if residue_subset_mask is not None:
-        mask = mask & residue_subset_mask.to(mask.device)
-
+    
     coords = coords[mask].unsqueeze(0)
     elements = elements[mask]
     bfactors = bfactors[mask]
@@ -403,7 +386,7 @@ def _generate_dataset_for_pdb(
     if voxel_size is None:
         voxel_size = args.resolution / 2.0
 
-    lattice, lattice_meta, center = prepare_lattice_from_atom_stack(
+    lattice, lattice_meta, _ = prepare_lattice_from_atom_stack(
         atom_stack=atom_stack,
         voxel_size=voxel_size,
         padding=args.padding,
@@ -457,7 +440,6 @@ def _generate_dataset_for_pdb(
             lattice=lattice,
             projection_axis=axis,
             collapse_projection_axis=args.collapse_projection_axis,
-            center=center,
             fast_renderer=fast_renderer,
         )
         projections[idx] = projection.detach().cpu()
