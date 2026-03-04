@@ -42,10 +42,6 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         supervised_assignment_by_index: bool = True,
     ):
         self.device = torch.device(device)
-        # Hard-coded simple image loss for guidance.
-        self.loss_reduction = "mean"
-        self.loss_type = "mse"
-        self.loss_topk = None
         self._projection_log_every = log_projection_every
         self._projection_log_pairs = log_projection_pairs
         self._projection_log_calls = 0
