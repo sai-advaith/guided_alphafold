@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any
 
+import gemmi
+import numpy as np
 import torch
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch.utils.data import Dataset as TorchDataset
@@ -22,38 +23,31 @@ def projection_shape(grid_dims: tuple[int, int, int], axis: int) -> tuple[int, i
     return (grid_dims[0], grid_dims[1])
 
 
-def prepare_lattice_from_atom_stack(
+def prepare_lattice_from_density_map(
     *,
-    atom_stack: AtomStack,
-    voxel_size: float,
-    padding: float,
+    density_map_path: str | Path,
     sublattice_radius: float,
     projection_axis: int,
     collapse_projection_axis: bool,
     device: torch.device | str,
-) -> tuple[Lattice, dict[str, Any], torch.Tensor]:
-    coords = atom_stack.atom_coordinates[0]
-    center = coords.mean(dim=0)
-    radius = torch.linalg.norm(coords - center, dim=1).max().item()
+) -> tuple[Lattice, dict[str, Any]]:
+    density_map = gemmi.read_ccp4_map(str(density_map_path))
+    D = density_map.grid.nu
+    maxsize = density_map.grid.unit_cell.a
+    pixel_size = maxsize / D
+    left_bottom = list(np.array(list(density_map.get_extent().minimum)) * maxsize)
+    right_upper = list(np.array(list(density_map.get_extent().maximum)) * maxsize)
 
-    half_span = radius + padding
-    span = 2.0 * half_span
-    grid_dim = int(math.ceil(span / voxel_size)) + 1
-    half_span_adjusted = 0.5 * (grid_dim - 1) * voxel_size
-
-    center_cpu = center.detach().cpu().numpy()
-    left_bottom = (center_cpu - half_span_adjusted).tolist()
-    right_upper = (center_cpu + half_span_adjusted).tolist()
-
-    grid_dimensions = [grid_dim, grid_dim, grid_dim]
-    voxel_sizes = [voxel_size, voxel_size, voxel_size]
-    projection_depth = grid_dim * voxel_size
+    grid_dimensions = [D, D, D]
+    voxel_sizes = [pixel_size, pixel_size, pixel_size]
+    projection_depth = D * pixel_size
 
     if collapse_projection_axis:
+        center_on_axis = (left_bottom[projection_axis] + right_upper[projection_axis]) / 2.0
         grid_dimensions[projection_axis] = 1
         voxel_sizes[projection_axis] = projection_depth
-        left_bottom[projection_axis] = float(center_cpu[projection_axis])
-        right_upper[projection_axis] = float(center_cpu[projection_axis])
+        left_bottom[projection_axis] = center_on_axis
+        right_upper[projection_axis] = center_on_axis
 
     lattice = Lattice.from_grid_dimensions_and_voxel_sizes(
         grid_dimensions=tuple(grid_dimensions),
@@ -70,15 +64,14 @@ def prepare_lattice_from_atom_stack(
         "voxel_sizes": voxel_sizes,
         "left_bottom": left_bottom,
         "right_upper": right_upper,
-        "center": center_cpu.tolist(),
-        "radius": radius,
-        "padding": padding,
+        "D": D,
+        "pixel_size": pixel_size,
         "sublattice_radius": sublattice_radius,
         "projection_axis": projection_axis,
         "projection_depth": projection_depth,
         "collapse_projection_axis": collapse_projection_axis,
     }
-    return lattice, lattice_meta, center.unsqueeze(0)
+    return lattice, lattice_meta
 
 
 def lattice_from_meta(
@@ -162,7 +155,7 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
     ) -> dict[str, Any]:
         device = torch.device(device)
         pt_path = Path(pt_path)
-        data = torch.load(pt_path, map_location="cpu")
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
         if not isinstance(data, dict):
             raise ValueError(f"Expected dict payload in {pt_path}, got {type(data)!r}")
         if "projections" not in data or "rotations" not in data:
@@ -483,7 +476,6 @@ class CryoImageRenderer:
             rot_batch = rotations[rot_start:rot_end]
             rot_count = int(rot_batch.shape[0])
 
-            # Keep rotation behavior consistent with cryoforward AtomStack.apply_rigid_transform.
             coords_for_transform = coords.repeat(rot_count, 1, 1)
             rotations_for_transform = rot_batch.repeat_interleave(batch, dim=0)
 

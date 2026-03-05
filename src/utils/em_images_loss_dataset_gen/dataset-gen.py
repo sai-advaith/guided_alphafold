@@ -28,7 +28,7 @@ from src.utils.io import load_pdb_atom_locations_full
 try:
     from src.utils.cryoimage_renderer import (
         CryoImageRenderer,
-        prepare_lattice_from_atom_stack,
+        prepare_lattice_from_density_map,
         projection_shape,
     )
     from cryoforward.atom_stack import AtomStack
@@ -90,28 +90,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--density-map",
+        type=str,
+        required=True,
+        help="Path to a CCP4 density map file. Grid dimensions and voxel size are read from this map.",
+    )
+    parser.add_argument(
         "--num-rotations",
         type=int,
         default=1000,
         help="Number of random rotations per structure.",
-    )
-    parser.add_argument(
-        "--resolution",
-        type=float,
-        default=2.0,
-        help="Target resolution in Angstroms (used to derive voxel size if not provided).",
-    )
-    parser.add_argument(
-        "--voxel-size",
-        type=float,
-        default=None,
-        help="Voxel size in Angstroms. If omitted, uses resolution/2 (Nyquist).",
-    )
-    parser.add_argument(
-        "--padding",
-        type=float,
-        default=10.0,
-        help="Padding in Angstroms added to the bounding sphere.",
     )
     parser.add_argument(
         "--sublattice-radius",
@@ -382,14 +370,8 @@ def _generate_dataset_for_pdb(
         effective_bfactor_override = config_bfactor_override
     _ensure_bfactors(atom_stack, effective_bfactor_override, args.atomic_radius)
 
-    voxel_size = args.voxel_size
-    if voxel_size is None:
-        voxel_size = args.resolution / 2.0
-
-    lattice, lattice_meta, _ = prepare_lattice_from_atom_stack(
-        atom_stack=atom_stack,
-        voxel_size=voxel_size,
-        padding=args.padding,
+    lattice, lattice_meta = prepare_lattice_from_density_map(
+        density_map_path=args.density_map,
         sublattice_radius=args.sublattice_radius,
         projection_axis=axis,
         collapse_projection_axis=args.collapse_projection_axis,
@@ -457,10 +439,9 @@ def _generate_dataset_for_pdb(
     meta = {
         "pdb_id": pdb_id,
         "pdb_path": str(pdb_path),
+        "density_map": str(args.density_map),
         "num_rotations": args.num_rotations,
         "projection_axis": args.projection_axis,
-        "voxel_size": voxel_size,
-        "resolution": args.resolution,
         "bfactor_override": effective_bfactor_override,
         "atomic_radius": args.atomic_radius,
         "device": str(device),

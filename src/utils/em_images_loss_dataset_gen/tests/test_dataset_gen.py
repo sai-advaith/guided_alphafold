@@ -11,6 +11,7 @@ import pytest
 
 torch = pytest.importorskip("torch", reason="PyTorch not installed")
 pytest.importorskip("cryoforward", reason="cryoforward not installed")
+gemmi = pytest.importorskip("gemmi", reason="gemmi not installed")
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "dataset-gen.py"
 spec = importlib.util.spec_from_file_location("dataset_gen", MODULE_PATH)
@@ -19,6 +20,18 @@ if spec is None or spec.loader is None:
 
 dataset_gen = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dataset_gen)
+
+
+def _make_ccp4_map(path: Path, D: int = 20, pixel_size: float = 3.0) -> Path:
+    """Write a minimal synthetic CCP4 map for testing."""
+    ccp4 = gemmi.Ccp4Map()
+    ccp4.grid = gemmi.FloatGrid(D, D, D)
+    maxsize = D * pixel_size
+    ccp4.grid.unit_cell.set(maxsize, maxsize, maxsize, 90, 90, 90)
+    ccp4.grid.spacegroup = gemmi.SpaceGroup("P1")
+    map_path = path / "test.ccp4"
+    ccp4.write_ccp4_map(str(map_path))
+    return map_path
 
 
 def test_parse_args_requires_input(monkeypatch):
@@ -30,10 +43,11 @@ def test_parse_args_requires_input(monkeypatch):
 def test_parse_args_accepts_files_and_ids(monkeypatch, tmp_path):
     pdb_path = tmp_path / "example.pdb"
     pdb_path.write_text("HEADER\n")
+    map_path = _make_ccp4_map(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["dataset-gen.py", "--pdb-file", str(pdb_path), "--pdb-id", "1abc"],
+        ["dataset-gen.py", "--pdb-file", str(pdb_path), "--pdb-id", "1abc", "--density-map", str(map_path)],
     )
     args = dataset_gen._parse_args()
     assert args.pdb_files == [str(pdb_path)]
@@ -154,11 +168,10 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
         classmethod(limited_from_pdb_file),
     )
 
+    map_path = _make_ccp4_map(tmp_path, D=10, pixel_size=10.0)
     args = argparse.Namespace(
+        density_map=str(map_path),
         num_rotations=1,
-        resolution=20.0,
-        voxel_size=10.0,
-        padding=5.0,
         sublattice_radius=2.0,
         projection_axis="z",
         collapse_projection_axis=True,
@@ -190,39 +203,10 @@ def test_canonical_output_pdb_id_is_uppercase():
     assert dataset_gen._canonical_output_pdb_id(Path("7T55.pdb")) == "7T55"
 
 
-def test_prepare_lattice_collapses_axis(monkeypatch):
-    pdb_path = Path(__file__).parent / "pdbs" /  "7t54.pdb"
-    original_from_pdb = dataset_gen.AtomStack.from_pdb_file
-
-    def limited_from_pdb_file(
-        cls, file_path, model_index=0, chains_to_include=None, device="cpu"
-    ):
-        stack = original_from_pdb(
-            file_path,
-            model_index=model_index,
-            chains_to_include=chains_to_include,
-            device=device,
-        )
-        n_atoms = min(20, stack.atom_coordinates.shape[1])
-        return dataset_gen.AtomStack(
-            atom_coordinates=stack.atom_coordinates[:, :n_atoms, :],
-            atom_names=stack.atom_names[:n_atoms],
-            bfactors=stack.bfactors[:, :n_atoms, :] if stack.bfactors is not None else None,
-            device=device,
-            occupancies=stack.occupancies,
-        )
-
-    monkeypatch.setattr(
-        dataset_gen.AtomStack,
-        "from_pdb_file",
-        classmethod(limited_from_pdb_file),
-    )
-
-    atom_stack = dataset_gen.AtomStack.from_pdb_file(str(pdb_path), device="cpu")
-    lattice, meta, _ = dataset_gen.prepare_lattice_from_atom_stack(
-        atom_stack=atom_stack,
-        voxel_size=8.0,
-        padding=5.0,
+def test_prepare_lattice_collapses_axis(tmp_path):
+    map_path = _make_ccp4_map(tmp_path, D=20, pixel_size=3.0)
+    lattice, meta = dataset_gen.prepare_lattice_from_density_map(
+        density_map_path=map_path,
         sublattice_radius=2.0,
         projection_axis=2,
         collapse_projection_axis=True,
@@ -234,7 +218,7 @@ def test_prepare_lattice_collapses_axis(monkeypatch):
     assert meta["voxel_sizes"][2] == pytest.approx(meta["projection_depth"])
 
 
-def test_collapsed_projection_matches_full_sum():
+def test_collapsed_projection_matches_full_sum(tmp_path):
     pdb_path = Path(__file__).parent / "pdbs" /  "7t54.pdb"
     atom_stack = dataset_gen.AtomStack.from_pdb_file(str(pdb_path), device="cpu")
     n_atoms = min(50, atom_stack.atom_coordinates.shape[1])
@@ -246,24 +230,19 @@ def test_collapsed_projection_matches_full_sum():
         occupancies=atom_stack.occupancies,
     )
 
-    voxel_size = 2.0
-    padding = 5.0
     sublattice_radius = 10.0
     axis = 2
 
-    lattice_full, _, _ = dataset_gen.prepare_lattice_from_atom_stack(
-        atom_stack=atom_stack,
-        voxel_size=voxel_size,
-        padding=padding,
+    map_path = _make_ccp4_map(tmp_path, D=50, pixel_size=3.0)
+    lattice_full, _ = dataset_gen.prepare_lattice_from_density_map(
+        density_map_path=map_path,
         sublattice_radius=sublattice_radius,
         projection_axis=axis,
         collapse_projection_axis=False,
         device=torch.device("cpu"),
     )
-    lattice_collapsed, _, _ = dataset_gen.prepare_lattice_from_atom_stack(
-        atom_stack=atom_stack,
-        voxel_size=voxel_size,
-        padding=padding,
+    lattice_collapsed, _ = dataset_gen.prepare_lattice_from_density_map(
+        density_map_path=map_path,
         sublattice_radius=sublattice_radius,
         projection_axis=axis,
         collapse_projection_axis=True,
