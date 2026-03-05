@@ -161,7 +161,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=str,
-        default=str(REPO_ROOT / "guided-alphafold-utils" / "datasets"),
+        default=str(REPO_ROOT / "pipeline_inputs" / "projections"),
         help="Output directory for generated datasets.",
     )
     parser.add_argument(
