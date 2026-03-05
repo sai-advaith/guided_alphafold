@@ -135,7 +135,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         return base_mask
 
     def _projection_loss(self, rendered: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-        return (rendered - gt).square().mean(dim=(1, 2)).mean()
+        return (rendered - gt).square().mean()
 
     def _setup_fast_solver(self) -> None:
         if self.dataset.num_conformations <= 0 or not self.reference_structures:
