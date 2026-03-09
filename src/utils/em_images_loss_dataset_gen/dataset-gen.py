@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
+import gemmi
 import numpy as np
 import torch
 import yaml
@@ -24,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.io import load_pdb_atom_locations_full
+from src.protenix.metrics.rmsd import self_aligned_rmsd
 
 try:
     from src.utils.cryoimage_renderer import (
@@ -188,9 +190,32 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Clear CUDA cache every N iterations (0 disables).",
     )
+    parser.add_argument(
+        "--align-to-reference-pdb",
+        type=str,
+        default=None,
+        help=(
+            "Optional reference PDB used to rigidly align the config-restricted atom set "
+            "before rendering. Requires --config so the alignment is done on the configured "
+            "sequence/chains rather than the full PDB."
+        ),
+    )
+    parser.add_argument(
+        "--aligned-pdb-out",
+        type=str,
+        default=None,
+        help=(
+            "Optional output path for saving the input PDB after applying the rigid transform "
+            "fit from --align-to-reference-pdb."
+        ),
+    )
     args = parser.parse_args()
     if not args.pdb_files and not args.pdb_ids:
         parser.error("At least one --pdb-file or --pdb-id must be provided.")
+    if args.align_to_reference_pdb is not None and args.config is None:
+        parser.error("--align-to-reference-pdb requires --config.")
+    if args.aligned_pdb_out is not None and args.align_to_reference_pdb is None:
+        parser.error("--aligned-pdb-out requires --align-to-reference-pdb.")
     return args
 
 
@@ -309,7 +334,13 @@ def _load_sequences_from_config(config_path: str):
     return sequences, chains_to_read, residue_ranges_pdb, bfactor_override
 
 
-def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: torch.device, residue_ranges_pdb=None):
+def _load_config_atom_payload(
+    pdb_path: Path,
+    sequences,
+    chains_to_read,
+    device: torch.device,
+    residue_ranges_pdb=None,
+):
     load_result = load_pdb_atom_locations_full(
         pdb_file=str(pdb_path),
         full_sequences_dict=sequences,
@@ -322,15 +353,35 @@ def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: t
     )
     coords, mask, bfactors, elements, starting_residue_indices = load_result
     mask = mask.to(dtype=torch.bool)
-
-    full_sequences = [[d["sequence"]] * d["count"] for d in sequences]
-    full_sequences = [item for sublist in full_sequences for item in sublist]
-    
-    coords = coords[mask].unsqueeze(0)
-    elements = elements[mask]
-    bfactors = bfactors[mask]
-    if bfactors.numel() == 0:
+    if int(mask.sum().item()) == 0:
         raise ValueError("No resolved atoms found after masking; check sequences/chains.")
+    return {
+        "coords_full": coords,
+        "mask": mask,
+        "bfactors_full": bfactors,
+        "elements_full": elements,
+        "starting_residue_indices": starting_residue_indices,
+    }
+
+
+def _atom_stack_from_config(
+    pdb_path: Path,
+    sequences,
+    chains_to_read,
+    device: torch.device,
+    residue_ranges_pdb=None,
+):
+    payload = _load_config_atom_payload(
+        pdb_path,
+        sequences,
+        chains_to_read,
+        device,
+        residue_ranges_pdb=residue_ranges_pdb,
+    )
+    mask = payload["mask"]
+    coords = payload["coords_full"][mask].unsqueeze(0)
+    elements = payload["elements_full"][mask]
+    bfactors = payload["bfactors_full"][mask]
     bfactors = bfactors.reshape(1, -1, 1).to(dtype=torch.float32, device=device)
 
     atom_stack = AtomStack.from_coords_and_atomic_numbers(
@@ -340,6 +391,95 @@ def _atom_stack_from_config(pdb_path: Path, sequences, chains_to_read, device: t
     )
     atom_stack.bfactors = bfactors
     return atom_stack, int(mask.sum().item()), int(mask.numel())
+
+
+def _align_atom_stack_from_config_to_reference(
+    *,
+    pdb_path: Path,
+    reference_pdb_path: Path,
+    sequences,
+    chains_to_read,
+    device: torch.device,
+    residue_ranges_pdb=None,
+) -> tuple[AtomStack, dict[str, object], torch.Tensor, torch.Tensor]:
+    moving = _load_config_atom_payload(
+        pdb_path,
+        sequences,
+        chains_to_read,
+        device,
+        residue_ranges_pdb=residue_ranges_pdb,
+    )
+    reference = _load_config_atom_payload(
+        reference_pdb_path,
+        sequences,
+        chains_to_read,
+        device,
+        residue_ranges_pdb=residue_ranges_pdb,
+    )
+
+    common_mask = moving["mask"] & reference["mask"]
+    common_atoms = int(common_mask.sum().item())
+    if common_atoms <= 0:
+        raise ValueError(
+            "No common resolved config atoms were found between the moving and reference PDBs."
+        )
+
+    alignment_rmsd, aligned_coords_full, rotation, translation = self_aligned_rmsd(
+        moving["coords_full"].unsqueeze(0),
+        reference["coords_full"].unsqueeze(0),
+        common_mask,
+    )
+
+    aligned_coords = aligned_coords_full[0, moving["mask"], :]
+    elements = moving["elements_full"][moving["mask"]]
+    bfactors = moving["bfactors_full"][moving["mask"]].reshape(1, -1, 1).to(dtype=torch.float32, device=device)
+
+    atom_stack = AtomStack.from_coords_and_atomic_numbers(
+        atom_coordinates=aligned_coords.unsqueeze(0),
+        atomic_numbers=elements,
+        device=device,
+    )
+    atom_stack.bfactors = bfactors
+
+    alignment_info = {
+        "reference_pdb_path": str(reference_pdb_path),
+        "moving_resolved_atoms": int(moving["mask"].sum().item()),
+        "moving_total_atoms": int(moving["mask"].numel()),
+        "common_resolved_atoms": common_atoms,
+        "rmsd": float(alignment_rmsd.detach().item()),
+        "rotation": rotation[0].detach().cpu().tolist(),
+        "translation": translation.reshape(-1, 3)[0].detach().cpu().tolist(),
+    }
+    return (
+        atom_stack,
+        alignment_info,
+        rotation[0].detach().cpu(),
+        translation.reshape(-1, 3)[0].detach().cpu(),
+    )
+
+
+def _write_transformed_pdb(
+    *,
+    input_pdb_path: Path,
+    output_pdb_path: Path,
+    rotation: torch.Tensor,
+    translation: torch.Tensor,
+) -> Path:
+    structure = gemmi.read_structure(str(input_pdb_path))
+    rot = rotation.detach().cpu().numpy()
+    trans = translation.detach().cpu().numpy()
+
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                for atom in residue:
+                    coord = np.array([atom.pos.x, atom.pos.y, atom.pos.z], dtype=np.float64)
+                    new_coord = coord @ rot.T + trans
+                    atom.pos = gemmi.Position(float(new_coord[0]), float(new_coord[1]), float(new_coord[2]))
+
+    output_pdb_path.parent.mkdir(parents=True, exist_ok=True)
+    structure.write_pdb(str(output_pdb_path))
+    return output_pdb_path
 
 
 def _generate_dataset_for_pdb(
@@ -357,10 +497,27 @@ def _generate_dataset_for_pdb(
     axis = AXIS_TO_DIM[args.projection_axis]
 
     resolved_info = None
+    alignment_info = None
+    alignment_rotation = None
+    alignment_translation = None
+    align_to_reference_pdb = getattr(args, "align_to_reference_pdb", None)
+    aligned_pdb_out = getattr(args, "aligned_pdb_out", None)
     if sequences is not None:
-        atom_stack, n_resolved, n_total = _atom_stack_from_config(
-            pdb_path, sequences, chains_to_read, device, residue_ranges_pdb=residue_ranges_pdb
-        )
+        if align_to_reference_pdb is not None:
+            atom_stack, alignment_info, alignment_rotation, alignment_translation = _align_atom_stack_from_config_to_reference(
+                pdb_path=pdb_path,
+                reference_pdb_path=Path(align_to_reference_pdb),
+                sequences=sequences,
+                chains_to_read=chains_to_read,
+                device=device,
+                residue_ranges_pdb=residue_ranges_pdb,
+            )
+            n_resolved = int(alignment_info["moving_resolved_atoms"])
+            n_total = int(alignment_info["moving_total_atoms"])
+        else:
+            atom_stack, n_resolved, n_total = _atom_stack_from_config(
+                pdb_path, sequences, chains_to_read, device, residue_ranges_pdb=residue_ranges_pdb
+            )
         resolved_info = {"resolved_atoms": n_resolved, "total_atoms": n_total}
     else:
         atom_stack = AtomStack.from_pdb_file(str(pdb_path), device=device)
@@ -453,6 +610,16 @@ def _generate_dataset_for_pdb(
         meta.update(resolved_info)
     else:
         meta["resolved_atoms_only"] = False
+    if alignment_info is not None:
+        if aligned_pdb_out is not None:
+            written_aligned_pdb = _write_transformed_pdb(
+                input_pdb_path=pdb_path,
+                output_pdb_path=Path(aligned_pdb_out),
+                rotation=alignment_rotation,
+                translation=alignment_translation,
+            )
+            alignment_info["aligned_pdb_path"] = str(written_aligned_pdb)
+        meta["alignment"] = alignment_info
 
     _save_outputs(projections, rotations, meta, output_path, args.output_format)
 

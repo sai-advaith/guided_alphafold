@@ -54,6 +54,50 @@ def test_parse_args_accepts_files_and_ids(monkeypatch, tmp_path):
     assert args.pdb_ids == ["1abc"]
 
 
+def test_parse_args_requires_config_for_alignment(monkeypatch, tmp_path):
+    pdb_path = tmp_path / "example.pdb"
+    pdb_path.write_text("HEADER\n")
+    map_path = tmp_path / "dummy.ccp4"
+    map_path.write_text("")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dataset-gen.py",
+            "--pdb-file",
+            str(pdb_path),
+            "--density-map",
+            str(map_path),
+            "--align-to-reference-pdb",
+            str(pdb_path),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        dataset_gen._parse_args()
+
+
+def test_parse_args_requires_alignment_for_aligned_pdb_output(monkeypatch, tmp_path):
+    pdb_path = tmp_path / "example.pdb"
+    pdb_path.write_text("HEADER\n")
+    map_path = tmp_path / "dummy.ccp4"
+    map_path.write_text("")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dataset-gen.py",
+            "--pdb-file",
+            str(pdb_path),
+            "--density-map",
+            str(map_path),
+            "--aligned-pdb-out",
+            str(tmp_path / "aligned.pdb"),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        dataset_gen._parse_args()
+
+
 def test_download_pdb_uses_cache(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +225,8 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
         out_dir=str(tmp_path),
         clear_cache_every=0,
         progress=False,
+        align_to_reference_pdb=None,
+        aligned_pdb_out=None,
     )
 
     dataset_gen._generate_dataset_for_pdb(pdb_path, args, torch.device("cpu"))
@@ -196,6 +242,111 @@ def test_generate_for_pdb_renders_and_saves(monkeypatch, tmp_path):
 
     meta_path = output_path.with_suffix(".json")
     assert meta_path.exists()
+
+
+def test_align_atom_stack_from_config_to_reference_uses_common_mask(monkeypatch, tmp_path):
+    moving_path = tmp_path / "moving.pdb"
+    reference_path = tmp_path / "reference.pdb"
+    moving_path.write_text("HEADER\n")
+    reference_path.write_text("HEADER\n")
+
+    moving_coords = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    reference_coords = torch.tensor(
+        [
+            [10.0, 0.0, 0.0],
+            [11.0, 0.0, 0.0],
+            [12.0, 0.0, 0.0],
+            [13.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    moving_mask = torch.tensor([True, True, False, True])
+    reference_mask = torch.tensor([True, False, True, True])
+    bfactors = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32)
+    elements = torch.tensor([6, 6, 8, 7], dtype=torch.int64)
+
+    payloads = {
+        str(moving_path): (moving_coords, moving_mask, bfactors, elements, [1]),
+        str(reference_path): (reference_coords, reference_mask, bfactors + 1.0, elements, [1]),
+    }
+
+    def fake_load_pdb_atom_locations_full(**kwargs):
+        return payloads[kwargs["pdb_file"]]
+
+    captured = {}
+
+    def fake_self_aligned_rmsd(pred_pose, true_pose, atom_mask, eps=0.0, reduce=True, allowing_reflection=False):
+        captured["mask"] = atom_mask.clone()
+        captured["pred_pose"] = pred_pose.clone()
+        captured["true_pose"] = true_pose.clone()
+        aligned = pred_pose + 10.0
+        rotation = torch.eye(3, dtype=pred_pose.dtype).unsqueeze(0)
+        translation = torch.tensor([[[1.0, 2.0, 3.0]]], dtype=pred_pose.dtype)
+        return torch.tensor(0.25, dtype=pred_pose.dtype), aligned, rotation, translation
+
+    monkeypatch.setattr(dataset_gen, "load_pdb_atom_locations_full", fake_load_pdb_atom_locations_full)
+    monkeypatch.setattr(dataset_gen, "self_aligned_rmsd", fake_self_aligned_rmsd)
+
+    atom_stack, alignment_info, rotation, translation = dataset_gen._align_atom_stack_from_config_to_reference(
+        pdb_path=moving_path,
+        reference_pdb_path=reference_path,
+        sequences=[{"sequence": "AAAA", "count": 1, "sequence_type": "proteinChain"}],
+        chains_to_read=["A"],
+        device=torch.device("cpu"),
+    )
+
+    expected_common_mask = moving_mask & reference_mask
+    assert torch.equal(captured["mask"], expected_common_mask)
+    assert torch.allclose(captured["pred_pose"][0], moving_coords)
+    assert torch.allclose(captured["true_pose"][0], reference_coords)
+    assert torch.allclose(atom_stack.atom_coordinates[0], (moving_coords + 10.0)[moving_mask])
+    assert atom_stack.bfactors is not None
+    assert torch.allclose(atom_stack.bfactors[0, :, 0], bfactors[moving_mask])
+    assert alignment_info["reference_pdb_path"] == str(reference_path)
+    assert alignment_info["moving_resolved_atoms"] == int(moving_mask.sum().item())
+    assert alignment_info["moving_total_atoms"] == int(moving_mask.numel())
+    assert alignment_info["common_resolved_atoms"] == int(expected_common_mask.sum().item())
+    assert alignment_info["rmsd"] == pytest.approx(0.25)
+    assert torch.allclose(rotation, torch.eye(3))
+    assert torch.allclose(translation, torch.tensor([1.0, 2.0, 3.0]))
+
+
+def test_write_transformed_pdb_applies_rigid_transform(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(
+        "ATOM      1  N   GLY A   1       1.000   2.000   3.000  1.00 10.00           N  \n"
+        "ATOM      2  CA  GLY A   1       4.000   5.000   6.000  1.00 10.00           C  \n"
+        "END\n"
+    )
+    output_pdb = tmp_path / "aligned.pdb"
+    rotation = torch.eye(3, dtype=torch.float32)
+    translation = torch.tensor([10.0, -2.0, 0.5], dtype=torch.float32)
+
+    written = dataset_gen._write_transformed_pdb(
+        input_pdb_path=input_pdb,
+        output_pdb_path=output_pdb,
+        rotation=rotation,
+        translation=translation,
+    )
+
+    assert written == output_pdb
+    structure = gemmi.read_structure(str(output_pdb))
+    atoms = [atom for residue in structure[0][0] for atom in residue]
+    assert len(atoms) == 2
+    assert atoms[0].pos.x == pytest.approx(11.0)
+    assert atoms[0].pos.y == pytest.approx(0.0)
+    assert atoms[0].pos.z == pytest.approx(3.5)
+    assert atoms[1].pos.x == pytest.approx(14.0)
+    assert atoms[1].pos.y == pytest.approx(3.0)
+    assert atoms[1].pos.z == pytest.approx(6.5)
 
 
 def test_canonical_output_pdb_id_is_uppercase():
