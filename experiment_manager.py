@@ -193,7 +193,9 @@ class ExperimentManager:
                     log_projection_pairs=getattr(cryoimage_config, "log_projection_pairs", 3),
                     max_rotations_per_batch=getattr(cryoimage_config, "max_rotations_per_batch", None),
                     bfactor_override=getattr(cryoimage_config, "bfactor_override", None),
-                    supervised_assignment_by_index=getattr(cryoimage_config, "supervised_assignment_by_index", True),
+                    supervised_assignment_by_index=getattr(cryoimage_config, "supervised_assignment_by_index", False),
+                    projection_batch_size=getattr(cryoimage_config, "projection_batch_size", None),
+                    shuffle_projection_samples=getattr(cryoimage_config, "shuffle_projection_samples", True),
                 )
                 loss_functions.append(loss_function)
                 loss_weight = getattr(cryoimage_config, "weight", 1)

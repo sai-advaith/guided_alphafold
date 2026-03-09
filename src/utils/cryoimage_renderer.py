@@ -7,7 +7,6 @@ from typing import Any
 import gemmi
 import numpy as np
 import torch
-from torch.utils.data import DataLoader as TorchDataLoader
 from torch.utils.data import Dataset as TorchDataset
 
 from cryoforward.atom_stack import AtomStack
@@ -209,9 +208,6 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
     def conformations(self) -> list[dict[str, Any]]:
         return self._conformations
 
-    def get_conformation(self, conformation_index: int) -> dict[str, Any]:
-        return self._conformations[conformation_index]
-
     def __getitem__(self, idx: int) -> dict[str, Any]:
         conf_idx, rot_idx = self._index[idx]
         conformation = self._conformations[conf_idx]
@@ -220,82 +216,7 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
             "rotation": conformation["rotations"][rot_idx],
             "conformation_index": conf_idx,
             "rotation_index": rot_idx,
-            "projection_axis": int(conformation["projection_axis"]),
-            "collapse_projection_axis": bool(conformation["collapse_projection_axis"]),
         }
-
-
-class CryoImageDataLoader(TorchDataLoader):
-    """
-    Torch DataLoader specialized for CryoImageDataset construction from .pt/.json files.
-    """
-
-    def __init__(
-        self,
-        *,
-        pt_paths: list[str | Path],
-        json_paths: list[str | Path] | None = None,
-        device: torch.device | str = "cpu",
-        dtype: torch.dtype = torch.float32,
-        batch_size: int = 1,
-        shuffle: bool = True,
-        num_workers: int = 0,
-        drop_last: bool = False,
-        pin_memory: bool | None = None,
-        persistent_workers: bool | None = None,
-        prefetch_factor: int | None = None,
-        generator: torch.Generator | None = None,
-    ) -> None:
-        self.device = torch.device(device)
-        self.dtype = dtype
-        self.cryo_dataset = CryoImageDataset.from_paths(
-            pt_paths=pt_paths,
-            json_paths=json_paths,
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        if num_workers > 0 and self.device.type != "cpu":
-            raise ValueError(
-                "num_workers > 0 requires CPU-backed dataset tensors. "
-                "Initialize CryoImageDataLoader with device='cpu' for multi-worker loading."
-            )
-
-        if pin_memory is None:
-            pin_memory = self.device.type == "cuda"
-        if persistent_workers is None:
-            persistent_workers = num_workers > 0
-
-        kwargs: dict[str, Any] = {
-            "dataset": self.cryo_dataset,
-            "batch_size": batch_size,
-            "shuffle": shuffle,
-            "num_workers": num_workers,
-            "drop_last": drop_last,
-            "pin_memory": pin_memory,
-            "persistent_workers": persistent_workers if num_workers > 0 else False,
-            "generator": generator,
-        }
-        if num_workers > 0 and prefetch_factor is not None:
-            kwargs["prefetch_factor"] = int(prefetch_factor)
-
-        super().__init__(**kwargs)
-
-    @classmethod
-    def as_dataset(
-        cls,
-        *,
-        pt_paths: list[str | Path],
-        json_paths: list[str | Path] | None = None,
-        device: torch.device | str = "cpu",
-        dtype: torch.dtype = torch.float32,
-    ) -> CryoImageDataset:
-        return CryoImageDataset.from_paths(
-            pt_paths=pt_paths,
-            json_paths=json_paths,
-            device=device,
-            dtype=dtype,
-        )
 
 
 class CryoImageRenderer:
@@ -314,7 +235,6 @@ class CryoImageRenderer:
         self.lattice = lattice
         self.projection_axis = int(projection_axis)
         self.collapse_projection_axis = bool(collapse_projection_axis)
-        self.fast_solver = fast_solver
         _, self._compute_batch_from_coords = fast_solver
         self._grid_dims = tuple(int(x) for x in lattice.grid_dimensions.tolist())
         self._projection_depth = float(lattice.voxel_sizes_in_A[self.projection_axis].item())
@@ -364,8 +284,6 @@ class CryoImageRenderer:
             bfactors = bfactors.unsqueeze(0)
         if bfactors.ndim == 2:
             bfactors = bfactors.unsqueeze(-1)
-        if bfactors.shape[0] == 1 and coords.shape[0] > 1:
-            bfactors = bfactors.expand(coords.shape[0], -1, -1)
 
         atom_stack = AtomStack.from_coords_and_atomic_numbers(
             atom_coordinates=coords,
@@ -373,7 +291,7 @@ class CryoImageRenderer:
             device=device,
         )
         atom_stack.bfactors = bfactors
-        if getattr(atom_stack, "occupancies", None) is None:
+        if atom_stack.occupancies is None:
             atom_stack.occupancies = torch.ones(
                 (coords.shape[0],),
                 dtype=coords.dtype,
@@ -402,21 +320,10 @@ class CryoImageRenderer:
             coords = coords[:, mask, :]
 
         if atomic_numbers is not None:
-            if atomic_numbers.ndim == 1:
-                atomic_numbers = atomic_numbers[mask]
-            elif atomic_numbers.ndim == 2:
-                if atomic_numbers.shape[0] == mask.shape[0]:
-                    atomic_numbers = atomic_numbers[mask]
-                elif atomic_numbers.shape[1] == mask.shape[0]:
-                    atomic_numbers = atomic_numbers[:, mask]
+            atomic_numbers = atomic_numbers[mask]
 
         if bfactors is not None:
-            if bfactors.ndim == 1:
-                bfactors = bfactors[mask]
-            elif bfactors.ndim == 2:
-                bfactors = bfactors[:, mask]
-            elif bfactors.ndim == 3:
-                bfactors = bfactors[:, mask, :]
+            bfactors = bfactors[mask]
 
         return coords, atomic_numbers, bfactors
 
@@ -430,18 +337,11 @@ class CryoImageRenderer:
         max_rotations_per_batch: int | None = None,
         occupancies: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if coords.ndim == 2:
-            coords = coords.unsqueeze(0)
-        if rotations.ndim == 2:
-            rotations = rotations.unsqueeze(0)
-
         batch = coords.shape[0]
         if bfactors.ndim == 1:
             bfactors = bfactors.unsqueeze(0)
         if bfactors.ndim == 2:
             bfactors = bfactors.unsqueeze(-1)
-        if bfactors.shape[0] == 1 and batch > 1:
-            bfactors = bfactors.expand(batch, -1, -1)
 
         atomic_numbers_for_solver = atomic_numbers.contiguous()
         if atomic_numbers_for_solver.ndim == 1:
@@ -498,10 +398,7 @@ class CryoImageRenderer:
                 occupancies_for_solver,
             )
 
-            if volumes.ndim == 2:
-                volumes = volumes.reshape(-1, *self._grid_dims)
-            elif volumes.ndim == 5 and volumes.shape[1] == 1:
-                volumes = volumes.squeeze(1)
+            volumes = volumes.squeeze(1)
 
             projection_dim = self.projection_axis + 1
             if self.collapse_projection_axis:

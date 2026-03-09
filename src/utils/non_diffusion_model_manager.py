@@ -664,16 +664,32 @@ class ProtenixModelManager:
 
             if guidance_direction is not None:
                 if normalize_gradients:
+                    delta_norm = delta.norm(dim=(1, 2), keepdim=True)
+                    guidance_norm = guidance_direction.norm(dim=(1, 2), keepdim=True)
+                    # If the structural guidance gradient vanishes (or is tiny relative to the diffusion update),
+                    # its direction is numerically unreliable. Treat that batch element as "no guidance" rather
+                    # than amplifying noise through normalization.
+                    min_guidance_norm = torch.maximum(
+                        torch.full_like(guidance_norm, 1e-12),
+                        delta_norm * 1e-6,
+                    )
+                    valid_guidance = guidance_norm > min_guidance_norm
+                    safe_guidance_norm = guidance_norm.clamp_min(1e-12)
+                    guidance_scale = torch.where(
+                        valid_guidance,
+                        delta_norm / safe_guidance_norm,
+                        torch.zeros_like(guidance_norm),
+                    )
                     # Normalize guidance to match delta norm (per batch element), then multiply by constants
                     # Same normalization logic for both scalar and per-atom constants
                     if isinstance(structures_gradient_norm, torch.Tensor):
                         # Per-atom constants: structures_gradient_norm shape [N_atoms]
                         # Expand to [1, N_atoms, 1] for broadcasting with [B, N_atoms, 3]
                         per_atom_constants = structures_gradient_norm.unsqueeze(0).unsqueeze(-1)  # [1, N_atoms, 1]
-                        guidance_direction = guidance_direction * delta.norm(dim=(1,2), keepdim=True) / guidance_direction.norm(dim=(1, 2), keepdim=True) * per_atom_constants
+                        guidance_direction = guidance_direction * guidance_scale * per_atom_constants
                     else:
                         # Scalar constant: use original behavior
-                        guidance_direction = guidance_direction * delta.norm(dim=(1,2), keepdim=True) / guidance_direction.norm(dim=(1, 2), keepdim=True) * structures_gradient_norm
+                        guidance_direction = guidance_direction * guidance_scale * structures_gradient_norm
                 delta = delta + step_size * guidance_direction
 
             dt = c_tau - t_hat
@@ -988,4 +1004,3 @@ def _compute_frozen_atoms_and_concatenateable_masks_and_params(
     }
     
     return output_dict
-

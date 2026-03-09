@@ -6,47 +6,14 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 
-def _install_dependency_stubs(monkeypatch, *, lattice_cls=None):
-    """Install lightweight stubs so the module can import without heavy deps."""
-    # losses.abstract_loss_funciton
-    abstract_mod = types.ModuleType("losses.abstract_loss_funciton")
+def _install_dependency_stubs(monkeypatch):
+    gemmi_mod = types.ModuleType("gemmi")
+    gemmi_mod.read_ccp4_map = lambda path: None
+    monkeypatch.setitem(sys.modules, "gemmi", gemmi_mod)
 
-    class AbstractLossFunction:
-        pass
-
-    abstract_mod.AbstractLossFunction = AbstractLossFunction
-    monkeypatch.setitem(sys.modules, "losses.abstract_loss_funciton", abstract_mod)
-
-    # utils.io
-    utils_pkg = types.ModuleType("utils")
-    utils_pkg.__path__ = []
-    utils_io = types.ModuleType("utils.io")
-
-    def alignment_mask_by_chain(full_sequences, chains_to_align, sequence_types):
-        return torch.ones(3, dtype=torch.bool)
-
-    def load_pdb_atom_locations_full(
-        pdb_file,
-        full_sequences_dict,
-        chains_to_read=None,
-        return_elements=True,
-        return_bfacs=True,
-        return_mask=True,
-    ):
-        coords = torch.zeros((3, 3))
-        mask = torch.ones(3, dtype=torch.bool)
-        bfactors = torch.zeros(3)
-        elements = torch.ones(3, dtype=torch.int64)
-        return coords, mask, bfactors, elements
-
-    utils_io.alignment_mask_by_chain = alignment_mask_by_chain
-    utils_io.load_pdb_atom_locations_full = load_pdb_atom_locations_full
-    monkeypatch.setitem(sys.modules, "utils", utils_pkg)
-    monkeypatch.setitem(sys.modules, "utils.io", utils_io)
-
-    # cryoforward namespace + stubs
     cryo_pkg = types.ModuleType("cryoforward")
     cryo_pkg.__path__ = []
     monkeypatch.setitem(sys.modules, "cryoforward", cryo_pkg)
@@ -62,10 +29,8 @@ def _install_dependency_stubs(monkeypatch, *, lattice_cls=None):
             dtype,
             device,
         ):
-            self.grid_dimensions = grid_dimensions
-            self.voxel_sizes_in_A = torch.tensor(
-                voxel_sizes_in_A, dtype=dtype, device=device
-            )
+            self.grid_dimensions = torch.tensor(grid_dimensions, dtype=torch.long, device=device)
+            self.voxel_sizes_in_A = torch.tensor(voxel_sizes_in_A, dtype=dtype, device=device)
             self.left_bottom_point_in_A = left_bottom_point_in_A
             self.right_upper_point_in_A = right_upper_point_in_A
             self.sublattice_radius_in_A = sublattice_radius_in_A
@@ -74,11 +39,8 @@ def _install_dependency_stubs(monkeypatch, *, lattice_cls=None):
         def from_grid_dimensions_and_voxel_sizes(cls, **kwargs):
             return cls(**kwargs)
 
-    if lattice_cls is None:
-        lattice_cls = DummyLattice
-
     lattice_mod = types.ModuleType("cryoforward.lattice")
-    lattice_mod.Lattice = lattice_cls
+    lattice_mod.Lattice = DummyLattice
     monkeypatch.setitem(sys.modules, "cryoforward.lattice", lattice_mod)
 
     atom_stack_mod = types.ModuleType("cryoforward.atom_stack")
@@ -89,14 +51,13 @@ def _install_dependency_stubs(monkeypatch, *, lattice_cls=None):
             self.atomic_numbers = atomic_numbers
             self.device = device
             self.bfactors = None
+            self.occupancies = None
 
         @classmethod
-        def from_coords_and_atomic_numbers(
-            cls, atom_coordinates, atomic_numbers, device=None
-        ):
+        def from_coords_and_atomic_numbers(cls, atom_coordinates, atomic_numbers, device=None):
             return cls(atom_coordinates, atomic_numbers, device=device)
 
-        def rotate(self, rotation, center=None, copy=True):
+        def apply_rigid_transform(self, rotation, translation=None, center=None, copy=False):
             return self
 
     atom_stack_mod.AtomStack = DummyAtomStack
@@ -104,258 +65,236 @@ def _install_dependency_stubs(monkeypatch, *, lattice_cls=None):
 
     cryoesp_mod = types.ModuleType("cryoforward.cryoesp_calculator")
 
-    def compute_volume_over_insertable_matrices(
-        atom_stack,
-        lattice,
-        B,
-        per_voxel_averaging=True,
-        subvolume_mask_in_indices=None,
-        use_checkpointing=False,
-        verbose=False,
-    ):
-        return torch.zeros(lattice.grid_dimensions, dtype=torch.float32)
+    def setup_fast_esp_solver(atom_stack, lattice, per_voxel_averaging=True, use_checkpointing=False, use_autocast=False):
+        def compute_batch_from_coords(coords_batch, bfactors, atomic_numbers, occupancies):
+            shape = coords_batch.shape[:2] + tuple(int(x) for x in lattice.grid_dimensions.tolist())
+            return torch.zeros(shape, dtype=coords_batch.dtype, device=coords_batch.device)
 
-    cryoesp_mod.compute_volume_over_insertable_matrices = (
-        compute_volume_over_insertable_matrices
-    )
+        return None, compute_batch_from_coords
+
+    cryoesp_mod.setup_fast_esp_solver = setup_fast_esp_solver
     monkeypatch.setitem(sys.modules, "cryoforward.cryoesp_calculator", cryoesp_mod)
 
-    cryo_utils_pkg = types.ModuleType("cryoforward.utils")
-    cryo_utils_pkg.__path__ = []
-    monkeypatch.setitem(sys.modules, "cryoforward.utils", cryo_utils_pkg)
-
-    rigid_mod = types.ModuleType("cryoforward.utils.rigid_transform")
-
-    class DummyRotation:
-        def __init__(self, matrix):
-            self.matrix = matrix
-
-        @classmethod
-        def from_matrix(cls, matrix):
-            return cls(matrix)
-
-    rigid_mod.Rotation = DummyRotation
-    monkeypatch.setitem(sys.modules, "cryoforward.utils.rigid_transform", rigid_mod)
-
-
-
-def _import_em_module(monkeypatch):
-    src_path = Path(__file__).resolve().parents[1] / "src"
-    monkeypatch.syspath_prepend(str(src_path))
-    _install_dependency_stubs(monkeypatch)
-    module = importlib.import_module("losses.em_images_loss_function")
-    monkeypatch.setitem(sys.modules, "losses.em_images_loss_function", module)
-    return module
-
-
-def test_init_validation_errors(monkeypatch):
-    em_module = _import_em_module(monkeypatch)
-    mask = torch.ones(3, dtype=torch.bool)
-    sequences = [{"sequence": "AAA", "count": 1}]
-
-    with pytest.raises(ValueError, match="image_pt_files"):
-        em_module.CryoEM_Images_GuidanceLossFunction(
-            [], None, ["ref.pdb"], mask, sequences
-        )
-
-    with pytest.raises(ValueError, match="reference_pdbs"):
-        em_module.CryoEM_Images_GuidanceLossFunction(
-            ["data.pt"], None, [], mask, sequences
-        )
-
-    with pytest.raises(ValueError, match="same length"):
-        em_module.CryoEM_Images_GuidanceLossFunction(
-            ["data.pt"], None, ["a.pdb", "b.pdb"], mask, sequences
-        )
-
-    with pytest.raises(ValueError, match="image_json_files"):
-        em_module.CryoEM_Images_GuidanceLossFunction(
-            ["data.pt"], ["a.json", "b.json"], ["a.pdb"], mask, sequences
-        )
-
-
-def test_load_dataset_reads_json_meta_and_projection_axis(tmp_path, monkeypatch):
-    em_module = _import_em_module(monkeypatch)
-
-    instance = em_module.CryoEM_Images_GuidanceLossFunction.__new__(
-        em_module.CryoEM_Images_GuidanceLossFunction
-    )
-    instance.device = torch.device("cpu")
-
-    projections = torch.zeros((2, 2, 2), dtype=torch.float32)
-    rotations = torch.stack([torch.eye(3), torch.eye(3)], dim=0)
-    pt_path = tmp_path / "sample.pt"
-    torch.save({"projections": projections, "rotations": rotations}, pt_path)
-
-    meta = {
-        "projection_axis": "y",
-        "lattice": {
-            "grid_dimensions": [2, 2, 2],
-            "voxel_sizes": [1.0, 2.0, 3.0],
-            "left_bottom": [0, 0, 0],
-            "right_upper": [2, 2, 2],
-            "sublattice_radius": 8.0,
-        },
-    }
-    json_path = tmp_path / "sample.json"
-    json_path.write_text(json.dumps(meta))
-
-    dataset = instance._load_dataset(str(pt_path), None)
-
-    assert dataset["projection_axis"] == 1
-    assert dataset["collapse_projection_axis"] is True
-    assert torch.equal(dataset["projections"], projections)
-    assert torch.equal(dataset["rotations"], rotations)
-    assert dataset["lattice"].voxel_sizes_in_A.tolist() == [1.0, 2.0, 3.0]
-
-
-def test_load_dataset_missing_lattice_meta_raises(tmp_path, monkeypatch):
-    em_module = _import_em_module(monkeypatch)
-
-    instance = em_module.CryoEM_Images_GuidanceLossFunction.__new__(
-        em_module.CryoEM_Images_GuidanceLossFunction
-    )
-    instance.device = torch.device("cpu")
-
-    pt_path = tmp_path / "bad.pt"
-    torch.save(
-        {
-            "projections": torch.zeros((1, 1, 1)),
-            "rotations": torch.eye(3).unsqueeze(0),
-            "meta": {"lattice": {"grid_dimensions": [1, 1, 1]}},
-        },
-        pt_path,
-    )
-
-    with pytest.raises(ValueError, match="Missing lattice metadata"):
-        instance._load_dataset(str(pt_path), None)
-
-
-def test_align_to_reference_combines_masks(monkeypatch):
-    em_module = _import_em_module(monkeypatch)
-
-    instance = em_module.CryoEM_Images_GuidanceLossFunction.__new__(
-        em_module.CryoEM_Images_GuidanceLossFunction
-    )
-    instance.AF3_to_pdb_mask = torch.tensor([True, False, True])
-    instance.align_to_chain_mask = torch.tensor([True, True, False])
-
-    captured = {}
+    rmsd_mod = types.ModuleType("src.protenix.metrics.rmsd")
 
     def fake_self_aligned_rmsd(pred, true, mask):
-        captured["mask"] = mask
-        return None, pred + 1.0, None, None
+        return torch.zeros(pred.shape[0], device=pred.device), pred, None, None
 
-    monkeypatch.setattr(em_module, "self_aligned_rmsd", fake_self_aligned_rmsd)
+    rmsd_mod.self_aligned_rmsd = fake_self_aligned_rmsd
+    monkeypatch.setitem(sys.modules, "src.protenix.metrics.rmsd", rmsd_mod)
 
-    x_0_hat = torch.zeros((1, 3, 3))
-    reference = {"coords": torch.zeros((3, 3))}
+    utils_io_mod = types.ModuleType("src.utils.io")
 
-    aligned = instance._align_to_reference(x_0_hat, reference)
+    def alignment_mask_by_chain(full_sequences, chains_to_align, sequence_types):
+        return torch.ones(3, dtype=torch.bool)
 
-    expected_mask = torch.tensor([True, False, False])
-    assert torch.equal(captured["mask"], expected_mask)
-    assert torch.equal(aligned, x_0_hat + 1.0)
+    def load_pdb_atom_locations_full(
+        pdb_file,
+        full_sequences_dict,
+        chains_to_read=None,
+        return_elements=True,
+        return_bfacs=True,
+        return_mask=True,
+        return_starting_indices=True,
+    ):
+        coords = torch.zeros((3, 3), dtype=torch.float32)
+        mask = torch.ones(3, dtype=torch.bool)
+        bfactors = torch.zeros(3, dtype=torch.float32)
+        elements = torch.ones(3, dtype=torch.int64)
+        starting_residue_indices = [0]
+        return coords, mask, bfactors, elements, starting_residue_indices
+
+    utils_io_mod.alignment_mask_by_chain = alignment_mask_by_chain
+    utils_io_mod.load_pdb_atom_locations_full = load_pdb_atom_locations_full
+    monkeypatch.setitem(sys.modules, "src.utils.io", utils_io_mod)
 
 
-def test_call_averages_losses_and_sets_last_value(monkeypatch):
-    em_module = _import_em_module(monkeypatch)
+def _import_modules(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(repo_root))
+    _install_dependency_stubs(monkeypatch)
 
-    instance = em_module.CryoEM_Images_GuidanceLossFunction.__new__(
-        em_module.CryoEM_Images_GuidanceLossFunction
-    )
-    instance.loss_reduction = "mean"
-    instance.last_loss_value = None
+    losses_pkg = types.ModuleType("src.losses")
+    losses_pkg.__path__ = [str(repo_root / "src" / "losses")]
+    monkeypatch.setitem(sys.modules, "src.losses", losses_pkg)
 
-    dataset_one = {
-        "projections": torch.zeros((2, 2)),
-        "rendered": torch.ones((2, 2)),
-    }
-    dataset_two = {
-        "projections": torch.ones((2, 2)),
-        "rendered": torch.ones((2, 2)),
-    }
-    instance.datasets = [dataset_one, dataset_two]
-    instance.reference_structures = [
-        {
-            "coords": torch.zeros((3, 3)),
-            "bfactors": torch.zeros(3),
-            "atomic_numbers": torch.ones(3, dtype=torch.int64),
+    for module_name in (
+        "src.utils.cryoimage_renderer",
+        "src.losses.em_images_loss_function",
+    ):
+        sys.modules.pop(module_name, None)
+
+    renderer_mod = importlib.import_module("src.utils.cryoimage_renderer")
+    loss_mod = importlib.import_module("src.losses.em_images_loss_function")
+    return renderer_mod, loss_mod
+
+
+def _write_projection_source(tmp_path: Path, name: str, projections: torch.Tensor) -> tuple[str, str]:
+    pt_path = tmp_path / f"{name}.pt"
+    json_path = tmp_path / f"{name}.json"
+    rotations = torch.stack([torch.eye(3) for _ in range(int(projections.shape[0]))], dim=0)
+    torch.save({"projections": projections, "rotations": rotations}, pt_path)
+    meta = {
+        "projection_axis": "z",
+        "lattice": {
+            "grid_dimensions": [2, 2, 1],
+            "voxel_sizes": [1.0, 1.0, 1.0],
+            "left_bottom": [0.0, 0.0, 0.0],
+            "right_upper": [2.0, 2.0, 1.0],
+            "sublattice_radius": 8.0,
+            "projection_axis": 2,
+            "collapse_projection_axis": True,
         },
-        {
-            "coords": torch.zeros((3, 3)),
-            "bfactors": torch.zeros(3),
-            "atomic_numbers": torch.ones(3, dtype=torch.int64),
-        },
-    ]
+    }
+    json_path.write_text(json.dumps(meta))
+    return str(pt_path), str(json_path)
+
+
+def _make_loss_fn(tmp_path, monkeypatch, *, projections_by_conf, supervised_assignment_by_index):
+    _, loss_mod = _import_modules(monkeypatch)
+
+    def fake_setup_fast_solver(self):
+        self._fast_renderers = [
+            [object() for _ in self.reference_structures]
+            for _ in range(self.dataset.num_conformations)
+        ]
 
     def fake_align(self, x_0_hat, reference):
         return x_0_hat
 
-    def fake_render(self, coords, atomic_numbers, bfactors, dataset):
-        return dataset["rendered"]
+    def fake_render(self, *, conformation_index, structure_index, aligned_structure, rotations):
+        return torch.full((rotations.shape[0], 2, 2), float(structure_index), device=rotations.device)
 
     monkeypatch.setattr(
-        em_module.CryoEM_Images_GuidanceLossFunction, "_align_to_reference", fake_align
+        loss_mod.CryoEM_Images_GuidanceLossFunction,
+        "_setup_fast_solver",
+        fake_setup_fast_solver,
     )
     monkeypatch.setattr(
-        em_module.CryoEM_Images_GuidanceLossFunction,
-        "_render_all_rotations",
+        loss_mod.CryoEM_Images_GuidanceLossFunction,
+        "_align_to_reference",
+        fake_align,
+    )
+    monkeypatch.setattr(
+        loss_mod.CryoEM_Images_GuidanceLossFunction,
+        "_render_projection_batch",
         fake_render,
     )
 
-    loss = instance(torch.zeros((1, 3, 3)), time=None)
+    pt_paths = []
+    json_paths = []
+    for idx, projections in enumerate(projections_by_conf):
+        pt_path, json_path = _write_projection_source(tmp_path, f"conf_{idx}", projections)
+        pt_paths.append(pt_path)
+        json_paths.append(json_path)
 
-    assert torch.isclose(loss, torch.tensor(0.5))
-    assert instance.last_loss_value == pytest.approx(0.5)
+    mask = torch.ones(3, dtype=torch.bool)
+    sequences = [{"sequence": "AAA", "count": 1}]
 
-
-def test_render_all_rotations_expands_bfactors(monkeypatch):
-    em_module = _import_em_module(monkeypatch)
-
-    class CaptureAtomStack:
-        last_instance = None
-
-        def __init__(self, atom_coordinates, atomic_numbers, device=None):
-            self.atom_coordinates = atom_coordinates
-            self.atomic_numbers = atomic_numbers
-            self.device = device
-            self.bfactors = None
-            CaptureAtomStack.last_instance = self
-
-        @classmethod
-        def from_coords_and_atomic_numbers(
-            cls, atom_coordinates, atomic_numbers, device=None
-        ):
-            return cls(atom_coordinates, atomic_numbers, device=device)
-
-    monkeypatch.setattr(em_module, "AtomStack", CaptureAtomStack)
-
-    def fake_render_single(self, atom_stack, lattice, rotation_matrix, projection_axis, collapse_projection_axis):
-        return torch.zeros((2, 2))
-
-    monkeypatch.setattr(
-        em_module.CryoEM_Images_GuidanceLossFunction,
-        "_render_single_projection",
-        fake_render_single,
+    return loss_mod.CryoEM_Images_GuidanceLossFunction(
+        image_pt_files=pt_paths,
+        image_json_files=json_paths,
+        reference_pdbs=["ref_a.pdb", "ref_b.pdb"],
+        mask=mask,
+        sequences_dictionary=sequences,
+        device="cpu",
+        log_projection_every=0,
+        log_projection_pairs=0,
+        supervised_assignment_by_index=supervised_assignment_by_index,
+        projection_batch_size=2,
+        shuffle_projection_samples=False,
     )
 
-    instance = em_module.CryoEM_Images_GuidanceLossFunction.__new__(
-        em_module.CryoEM_Images_GuidanceLossFunction
+
+def test_mixed_dataset_exposes_projection_level_samples(tmp_path, monkeypatch):
+    renderer_mod, _ = _import_modules(monkeypatch)
+
+    pt_a, json_a = _write_projection_source(
+        tmp_path,
+        "a",
+        torch.stack([torch.zeros((2, 2)), torch.full((2, 2), 2.0)], dim=0),
     )
-    instance.device = torch.device("cpu")
+    pt_b, json_b = _write_projection_source(
+        tmp_path,
+        "b",
+        torch.ones((1, 2, 2)),
+    )
 
-    coords = torch.zeros((2, 3, 3))
-    atomic_numbers = torch.ones(3, dtype=torch.int64)
-    bfactors = torch.zeros((1, 3))
-    dataset = {
-        "rotations": torch.stack([torch.eye(3), torch.eye(3)], dim=0),
-        "lattice": object(),
-        "projection_axis": 0,
-        "collapse_projection_axis": True,
-    }
+    dataset = renderer_mod.CryoImageDataset.from_paths(
+        pt_paths=[pt_a, pt_b],
+        json_paths=[json_a, json_b],
+        device="cpu",
+    )
 
-    instance._render_all_rotations(coords, atomic_numbers, bfactors, dataset)
+    assert len(dataset) == 3
+    assert dataset.num_conformations == 2
 
-    assert CaptureAtomStack.last_instance is not None
-    assert CaptureAtomStack.last_instance.bfactors.shape == (2, 3, 1)
+    first = dataset[0]
+    last = dataset[2]
+    assert first["conformation_index"] == 0
+    assert first["rotation_index"] == 0
+    assert last["conformation_index"] == 1
+    assert last["rotation_index"] == 0
+
+    loader = DataLoader(dataset, batch_size=2, shuffle=False)
+    batch = next(iter(loader))
+    assert batch["projection"].shape == (2, 2, 2)
+    assert torch.equal(batch["conformation_index"], torch.tensor([0, 0]))
+    assert torch.equal(batch["rotation_index"], torch.tensor([0, 1]))
+
+
+def test_dynamic_assignment_uses_lowest_loss_and_reports_metrics(tmp_path, monkeypatch):
+    loss_fn = _make_loss_fn(
+        tmp_path,
+        monkeypatch,
+        projections_by_conf=[
+            torch.zeros((2, 2, 2)),
+            torch.ones((2, 2, 2)),
+        ],
+        supervised_assignment_by_index=False,
+    )
+
+    x_0_hat = torch.zeros((2, 3, 3), dtype=torch.float32)
+    loss, _, _ = loss_fn(x_0_hat, time=None)
+
+    assert torch.isclose(loss, torch.tensor(0.0))
+    assert loss_fn.last_loss_value == pytest.approx(0.0)
+    assert loss_fn.last_assignment_accuracy == pytest.approx(1.0)
+    assert loss_fn.last_assignment_macro_precision == pytest.approx(1.0)
+    assert loss_fn.last_assignment_macro_recall == pytest.approx(1.0)
+    assert loss_fn.last_assignment_macro_f1 == pytest.approx(1.0)
+    assert loss_fn.last_assignment_margin_mean == pytest.approx(1.0)
+    assert loss_fn.last_assignment_counts == {0: 2, 1: 2}
+    assert torch.equal(
+        loss_fn.last_assignment_confusion_matrix,
+        torch.tensor([[2, 0], [0, 2]]),
+    )
+
+    wandb_log = loss_fn.wandb_log(x_0_hat)
+    assert wandb_log["cryoimage/assignment_accuracy"] == pytest.approx(1.0)
+    assert wandb_log["cryoimage/assigned_count_conf_0"] == pytest.approx(2.0)
+    assert wandb_log["cryoimage/confusion_true_1_pred_1"] == pytest.approx(2.0)
+
+
+def test_supervised_assignment_keeps_ground_truth_debug_path(tmp_path, monkeypatch):
+    loss_fn = _make_loss_fn(
+        tmp_path,
+        monkeypatch,
+        projections_by_conf=[
+            torch.ones((2, 2, 2)),
+            torch.zeros((2, 2, 2)),
+        ],
+        supervised_assignment_by_index=True,
+    )
+
+    x_0_hat = torch.zeros((2, 3, 3), dtype=torch.float32)
+    loss, _, _ = loss_fn(x_0_hat, time=None)
+
+    assert torch.isclose(loss, torch.tensor(1.0))
+    assert loss_fn.last_assignment_mode == "supervised"
+    assert loss_fn.last_assignment_accuracy == pytest.approx(1.0)
+    assert loss_fn.last_assignment_counts == {0: 2, 1: 2}
+    assert torch.equal(
+        loss_fn.last_assignment_confusion_matrix,
+        torch.tensor([[2, 0], [0, 2]]),
+    )
