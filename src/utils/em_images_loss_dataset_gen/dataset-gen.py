@@ -261,6 +261,7 @@ def _save_outputs(
     output_format: str,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path = output_path.with_suffix(".json")
 
     if output_format == "pt":
         torch.save(
@@ -271,14 +272,12 @@ def _save_outputs(
             },
             output_path,
         )
-        meta_path = output_path.with_suffix(".json")
     else:
         np.savez_compressed(
             output_path,
             projections=projections.numpy(),
             rotations=rotations.numpy(),
         )
-        meta_path = output_path.with_suffix(".json")
 
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -286,27 +285,13 @@ def _save_outputs(
 
 def _render_projection(
     atom_stack: AtomStack,
-    lattice: Lattice,
-    projection_axis: int,
-    collapse_projection_axis: bool,
+    fast_renderer: CryoImageRenderer,
     rotation: Rotation | None = None,
-    *,
-    fast_renderer: CryoImageRenderer | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if rotation is None:
         rotation = Rotation.random(batch=1, device=atom_stack.device)
 
     rot_matrix = rotation.to_matrix()
-    if fast_renderer is None:
-        fast_renderer = CryoImageRenderer.from_atom_stack(
-            atom_stack=atom_stack,
-            lattice=lattice,
-            projection_axis=projection_axis,
-            collapse_projection_axis=collapse_projection_axis,
-            use_checkpointing=False,
-            use_autocast=False,
-        )
-
     with torch.no_grad():
         projection = fast_renderer.render_all_rotations_from_coords(
             coords=atom_stack.atom_coordinates,
@@ -317,8 +302,7 @@ def _render_projection(
             occupancies=atom_stack.occupancies,
         )[0]
 
-    rotation_matrix = rotation.to_matrix().detach().cpu()[0]
-    return projection, rotation_matrix
+    return projection, rot_matrix.detach().cpu()[0]
 
 
 def _load_sequences_from_config(config_path: str):
@@ -328,10 +312,8 @@ def _load_sequences_from_config(config_path: str):
     for entry in sequences:
         entry.setdefault("sequence_type", "proteinChain")
     chains_to_read = cfg["protein"].get("chains_to_use")
-    cryoimage_cfg = cfg.get("loss_function", {}).get("cryoimage_loss_function", {})
-    residue_ranges_pdb = cryoimage_cfg.get("residue_ranges_pdb")
-    bfactor_override = cryoimage_cfg.get("bfactor_override")
-    return sequences, chains_to_read, residue_ranges_pdb, bfactor_override
+    bfactor_override = cfg.get("loss_function", {}).get("cryoimage_loss_function", {}).get("bfactor_override")
+    return sequences, chains_to_read, bfactor_override
 
 
 def _load_config_atom_payload(
@@ -339,7 +321,6 @@ def _load_config_atom_payload(
     sequences,
     chains_to_read,
     device: torch.device,
-    residue_ranges_pdb=None,
 ):
     load_result = load_pdb_atom_locations_full(
         pdb_file=str(pdb_path),
@@ -369,15 +350,8 @@ def _atom_stack_from_config(
     sequences,
     chains_to_read,
     device: torch.device,
-    residue_ranges_pdb=None,
 ):
-    payload = _load_config_atom_payload(
-        pdb_path,
-        sequences,
-        chains_to_read,
-        device,
-        residue_ranges_pdb=residue_ranges_pdb,
-    )
+    payload = _load_config_atom_payload(pdb_path, sequences, chains_to_read, device)
     mask = payload["mask"]
     coords = payload["coords_full"][mask].unsqueeze(0)
     elements = payload["elements_full"][mask]
@@ -400,22 +374,9 @@ def _align_atom_stack_from_config_to_reference(
     sequences,
     chains_to_read,
     device: torch.device,
-    residue_ranges_pdb=None,
 ) -> tuple[AtomStack, dict[str, object], torch.Tensor, torch.Tensor]:
-    moving = _load_config_atom_payload(
-        pdb_path,
-        sequences,
-        chains_to_read,
-        device,
-        residue_ranges_pdb=residue_ranges_pdb,
-    )
-    reference = _load_config_atom_payload(
-        reference_pdb_path,
-        sequences,
-        chains_to_read,
-        device,
-        residue_ranges_pdb=residue_ranges_pdb,
-    )
+    moving = _load_config_atom_payload(pdb_path, sequences, chains_to_read, device)
+    reference = _load_config_atom_payload(reference_pdb_path, sequences, chains_to_read, device)
 
     common_mask = moving["mask"] & reference["mask"]
     common_atoms = int(common_mask.sum().item())
@@ -488,7 +449,6 @@ def _generate_dataset_for_pdb(
     device: torch.device,
     sequences=None,
     chains_to_read=None,
-    residue_ranges_pdb=None,
     config_bfactor_override: float | None = None,
 ) -> None:
     if not pdb_path.exists():
@@ -500,23 +460,20 @@ def _generate_dataset_for_pdb(
     alignment_info = None
     alignment_rotation = None
     alignment_translation = None
-    align_to_reference_pdb = getattr(args, "align_to_reference_pdb", None)
-    aligned_pdb_out = getattr(args, "aligned_pdb_out", None)
     if sequences is not None:
-        if align_to_reference_pdb is not None:
+        if args.align_to_reference_pdb is not None:
             atom_stack, alignment_info, alignment_rotation, alignment_translation = _align_atom_stack_from_config_to_reference(
                 pdb_path=pdb_path,
-                reference_pdb_path=Path(align_to_reference_pdb),
+                reference_pdb_path=Path(args.align_to_reference_pdb),
                 sequences=sequences,
                 chains_to_read=chains_to_read,
                 device=device,
-                residue_ranges_pdb=residue_ranges_pdb,
             )
             n_resolved = int(alignment_info["moving_resolved_atoms"])
             n_total = int(alignment_info["moving_total_atoms"])
         else:
             atom_stack, n_resolved, n_total = _atom_stack_from_config(
-                pdb_path, sequences, chains_to_read, device, residue_ranges_pdb=residue_ranges_pdb
+                pdb_path, sequences, chains_to_read, device
             )
         resolved_info = {"resolved_atoms": n_resolved, "total_atoms": n_total}
     else:
@@ -575,11 +532,8 @@ def _generate_dataset_for_pdb(
 
     for idx in rotation_iter:
         projection, rotation_matrix = _render_projection(
-            atom_stack=atom_stack,
-            lattice=lattice,
-            projection_axis=axis,
-            collapse_projection_axis=args.collapse_projection_axis,
-            fast_renderer=fast_renderer,
+            atom_stack,
+            fast_renderer,
         )
         projections[idx] = projection.detach().cpu()
         rotations[idx] = rotation_matrix
@@ -611,10 +565,10 @@ def _generate_dataset_for_pdb(
     else:
         meta["resolved_atoms_only"] = False
     if alignment_info is not None:
-        if aligned_pdb_out is not None:
+        if args.aligned_pdb_out is not None:
             written_aligned_pdb = _write_transformed_pdb(
                 input_pdb_path=pdb_path,
-                output_pdb_path=Path(aligned_pdb_out),
+                output_pdb_path=Path(args.aligned_pdb_out),
                 rotation=alignment_rotation,
                 translation=alignment_translation,
             )
@@ -630,7 +584,6 @@ def main() -> None:
     print(f"Using device: {device}")
 
     torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
 
     pdb_paths = [Path(p) for p in args.pdb_files]
     pdb_cache_dir = Path(args.pdb_cache_dir) if args.pdb_cache_dir else Path(args.out_dir) / "pdbs"
@@ -639,10 +592,9 @@ def main() -> None:
 
     sequences = None
     chains_to_read = None
-    residue_ranges_pdb = None
     config_bfactor_override = None
     if args.config:
-        sequences, chains_to_read, residue_ranges_pdb, config_bfactor_override = _load_sequences_from_config(args.config)
+        sequences, chains_to_read, config_bfactor_override = _load_sequences_from_config(args.config)
 
     for pdb_path in pdb_paths:
         _generate_dataset_for_pdb(
@@ -651,7 +603,6 @@ def main() -> None:
             device,
             sequences=sequences,
             chains_to_read=chains_to_read,
-            residue_ranges_pdb=residue_ranges_pdb,
             config_bfactor_override=config_bfactor_override,
         )
 
