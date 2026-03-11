@@ -24,7 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.io import load_pdb_atom_locations_full
+from src.utils.io import (
+    load_pdb_atom_locations_full,
+    ATOM_NAME_TO_ELEMENT,
+    SEQUENCE_TYPE_TO_ATOM_DICTIONARY,
+    SEQUENCE_TYPE_TO_RESIDUE_KIND,
+)
 from src.protenix.metrics.rmsd import self_aligned_rmsd
 
 try:
@@ -201,12 +206,13 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--aligned-pdb-out",
+        "--pdb-out",
         type=str,
         default=None,
         help=(
-            "Optional output path for saving the input PDB after applying the rigid transform "
-            "fit from --align-to-reference-pdb."
+            "Optional output path for saving the input PDB restricted to the config-defined "
+            "chains. When --align-to-reference-pdb is also set, the rigid alignment transform "
+            "is applied before saving. Requires --config."
         ),
     )
     args = parser.parse_args()
@@ -214,8 +220,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("At least one --pdb-file or --pdb-id must be provided.")
     if args.align_to_reference_pdb is not None and args.config is None:
         parser.error("--align-to-reference-pdb requires --config.")
-    if args.aligned_pdb_out is not None and args.align_to_reference_pdb is None:
-        parser.error("--aligned-pdb-out requires --align-to-reference-pdb.")
+    if args.pdb_out is not None and args.config is None:
+        parser.error("--pdb-out requires --config.")
     return args
 
 
@@ -364,7 +370,7 @@ def _atom_stack_from_config(
         device=device,
     )
     atom_stack.bfactors = bfactors
-    return atom_stack, int(mask.sum().item()), int(mask.numel())
+    return atom_stack, int(mask.sum().item()), int(mask.numel()), payload
 
 
 def _align_atom_stack_from_config_to_reference(
@@ -416,31 +422,114 @@ def _align_atom_stack_from_config_to_reference(
         alignment_info,
         rotation[0].detach().cpu(),
         translation.reshape(-1, 3)[0].detach().cpu(),
+        aligned_coords_full[0].detach().cpu(),
+        moving,
     )
 
 
-def _write_transformed_pdb(
-    *,
-    input_pdb_path: Path,
-    output_pdb_path: Path,
-    rotation: torch.Tensor,
-    translation: torch.Tensor,
-) -> Path:
-    structure = gemmi.read_structure(str(input_pdb_path))
-    rot = rotation.detach().cpu().numpy()
-    trans = translation.detach().cpu().numpy()
 
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                for atom in residue:
-                    coord = np.array([atom.pos.x, atom.pos.y, atom.pos.z], dtype=np.float64)
-                    new_coord = coord @ rot.T + trans
-                    atom.pos = gemmi.Position(float(new_coord[0]), float(new_coord[1]), float(new_coord[2]))
 
-    output_pdb_path.parent.mkdir(parents=True, exist_ok=True)
-    structure.write_pdb(str(output_pdb_path))
-    return output_pdb_path
+
+
+def _save_pdb(structure, full_sequences, sequence_types, write_file_name, bfactors=None, atom_mask=None, chain_names=None, starting_residue_indices=None):
+    """
+    Save structure with proper chain names matching original PDB chain names.
+    Copied from non_diffusion_model_manager.save_structure_full to avoid heavy import chain.
+
+    Args:
+        structure: coords tensor of shape (N_total, 3)
+        full_sequences: list of one-letter sequences per chain
+        sequence_types: list of sequence types per chain (proteinChain, rnaSequence, dnaSequence)
+        write_file_name: output PDB file path
+        bfactors: optional tensor/array of B-factors (N_total,) or (ensemble, N_total)
+        atom_mask: boolean mask (N_total,) indicating resolved atoms
+        chain_names: optional list of chain names
+        starting_residue_indices: optional list of starting residue indices (1-indexed) per chain
+    """
+    gemmi_structure = gemmi.Structure()
+    model = gemmi.Model("1")
+
+    chains = []
+    if atom_mask is None:
+        atom_mask = torch.ones(structure.shape[0], dtype=torch.bool)
+
+    for i in range(len(full_sequences)):
+        if chain_names is not None and i < len(chain_names) and chain_names[i] is not None:
+            chain_name = chain_names[i]
+        else:
+            chain_name = chr(ord("A") + i)
+        chains.append(gemmi.Chain(chain_name))
+
+    iter_index = 0
+
+    structure = structure.cpu().detach().numpy()
+    if bfactors is not None:
+        if isinstance(bfactors, torch.Tensor):
+            bfactors = bfactors.cpu().detach().numpy()
+        if bfactors.ndim > 1:
+            bfactors = bfactors[0]
+
+    for chain_i, (chain, sequence_type) in enumerate(zip(chains, sequence_types)):
+        sequence = full_sequences[chain_i]
+        if starting_residue_indices is not None and chain_i < len(starting_residue_indices):
+            start_residue_num = starting_residue_indices[chain_i]
+        else:
+            start_residue_num = 1
+
+        for i, res_name_one_letter in enumerate(sequence):
+            res = gemmi.Residue()
+            res.name = gemmi.expand_one_letter(res_name_one_letter, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type])
+            res.seqid = gemmi.SeqId(start_residue_num + i, " ")
+            residue_has_atoms = False
+
+            # Every first residue of a dna or rna chain should have the OP3 atom
+            if sequence_type in ["rnaSequence", "dnaSequence"] and i == 0:
+                if atom_mask[iter_index] == True:
+                    atom = gemmi.Atom()
+                    atom.name = "OP3"
+                    atom.element = gemmi.Element("O")
+                    atom.pos = gemmi.Position(*structure[iter_index])
+                    if bfactors is not None:
+                        atom.b_iso = bfactors[iter_index]
+                    res.add_atom(atom)
+                    residue_has_atoms = True
+                iter_index += 1
+
+            for atom_name in SEQUENCE_TYPE_TO_ATOM_DICTIONARY[sequence_type][res.name]:
+                if atom_mask[iter_index] == True:
+                    atom = gemmi.Atom()
+                    atom.name = atom_name
+                    atom.element = gemmi.Element(ATOM_NAME_TO_ELEMENT[atom_name])
+                    atom.pos = gemmi.Position(*structure[iter_index])
+                    if bfactors is not None:
+                        atom.b_iso = bfactors[iter_index]
+                    res.add_atom(atom)
+                    residue_has_atoms = True
+                iter_index += 1
+
+            # Handle OXT atom for the last residue of each chain
+            if i == len(sequence) - 1 and sequence_type == "proteinChain":
+                if iter_index < len(atom_mask):
+                    if atom_mask[iter_index] == True:
+                        atom = gemmi.Atom()
+                        atom.name = "OXT"
+                        atom.element = gemmi.Element("O")
+                        atom.pos = gemmi.Position(*structure[iter_index])
+                        if bfactors is not None:
+                            atom.b_iso = bfactors[iter_index]
+                        res.add_atom(atom)
+                        residue_has_atoms = True
+                    iter_index += 1
+
+            if residue_has_atoms:
+                chain.add_residue(res)
+
+        model.add_chain(chain)
+
+    gemmi_structure.add_model(model)
+
+    Path(write_file_name).parent.mkdir(parents=True, exist_ok=True)
+    gemmi_structure.write_pdb(str(write_file_name))
 
 
 def _generate_dataset_for_pdb(
@@ -460,9 +549,11 @@ def _generate_dataset_for_pdb(
     alignment_info = None
     alignment_rotation = None
     alignment_translation = None
+    pdb_out_coords = None
+    pdb_out_payload = None
     if sequences is not None:
         if args.align_to_reference_pdb is not None:
-            atom_stack, alignment_info, alignment_rotation, alignment_translation = _align_atom_stack_from_config_to_reference(
+            atom_stack, alignment_info, alignment_rotation, alignment_translation, pdb_out_coords, pdb_out_payload = _align_atom_stack_from_config_to_reference(
                 pdb_path=pdb_path,
                 reference_pdb_path=Path(args.align_to_reference_pdb),
                 sequences=sequences,
@@ -472,9 +563,10 @@ def _generate_dataset_for_pdb(
             n_resolved = int(alignment_info["moving_resolved_atoms"])
             n_total = int(alignment_info["moving_total_atoms"])
         else:
-            atom_stack, n_resolved, n_total = _atom_stack_from_config(
+            atom_stack, n_resolved, n_total, pdb_out_payload = _atom_stack_from_config(
                 pdb_path, sequences, chains_to_read, device
             )
+            pdb_out_coords = pdb_out_payload["coords_full"]
         resolved_info = {"resolved_atoms": n_resolved, "total_atoms": n_total}
     else:
         atom_stack = AtomStack.from_pdb_file(str(pdb_path), device=device)
@@ -564,15 +656,21 @@ def _generate_dataset_for_pdb(
         meta.update(resolved_info)
     else:
         meta["resolved_atoms_only"] = False
+    if args.pdb_out is not None and pdb_out_payload is not None:
+        full_sequences_strs = [s for d in sequences for s in [d["sequence"]] * d["count"]]
+        sequence_types = [t for d in sequences for t in [d.get("sequence_type", "proteinChain")] * d["count"]]
+        _save_pdb(
+            structure=pdb_out_coords,
+            full_sequences=full_sequences_strs,
+            sequence_types=sequence_types,
+            write_file_name=args.pdb_out,
+            bfactors=pdb_out_payload["bfactors_full"],
+            atom_mask=pdb_out_payload["mask"],
+            chain_names=chains_to_read,
+            starting_residue_indices=pdb_out_payload["starting_residue_indices"],
+        )
+        meta["pdb_out"] = args.pdb_out
     if alignment_info is not None:
-        if args.aligned_pdb_out is not None:
-            written_aligned_pdb = _write_transformed_pdb(
-                input_pdb_path=pdb_path,
-                output_pdb_path=Path(args.aligned_pdb_out),
-                rotation=alignment_rotation,
-                translation=alignment_translation,
-            )
-            alignment_info["aligned_pdb_path"] = str(written_aligned_pdb)
         meta["alignment"] = alignment_info
 
     _save_outputs(projections, rotations, meta, output_path, args.output_format)
