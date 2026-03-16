@@ -71,6 +71,12 @@ class ExperimentManager:
         else:
             self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.general.name)
 
+        # Append wandb run ID so every run gets its own folder and is easy to find.
+        if wandb.run is not None:
+            self.experiment_save_dir = os.path.join(self.experiment_save_dir, wandb.run.id)
+            # Log the output path to wandb so it's clickable / searchable in the UI.
+            wandb.config.update({"output_dir": self.experiment_save_dir}, allow_val_change=True)
+
         os.makedirs(self.experiment_save_dir, exist_ok=True)      
         
         # Set save_folder in loss function if it's a CryoESP loss function
@@ -180,6 +186,37 @@ class ExperimentManager:
 
             elif "cryoimage" == loss_function_type:
                 cryoimage_config = self.config.loss_function.cryoimage_loss_function
+                # Build assignment strategy from config (default: hard argmin)
+                assignment_strategy = None
+                strategy_name = getattr(cryoimage_config, "assignment_mode", "hard_min_loss")
+                if strategy_name == "hard_min_loss":
+                    strategy_name = "hard"
+                if strategy_name != "hard":
+                    from src.losses.assignment_strategies import build_assignment_strategy
+                    params = getattr(cryoimage_config, "assignment_strategy_params", None)
+                    strategy_kwargs = vars(params).copy() if params is not None else {}
+                    # Map user-friendly config keys to constructor params
+                    t_start = strategy_kwargs.pop("temperature_start", None)
+                    t_end = strategy_kwargs.pop("temperature_end", None)
+                    anneal_steps = strategy_kwargs.pop("anneal_steps", None)
+                    if t_start is not None:
+                        strategy_kwargs["temperature_init"] = t_start
+                    if t_end is not None:
+                        strategy_kwargs["temperature_min"] = t_end
+                    if t_start is not None and t_end is not None and anneal_steps is not None and anneal_steps > 0:
+                        # decay^anneal_steps = t_end / t_start  =>  decay = (t_end / t_start) ^ (1 / anneal_steps)
+                        strategy_kwargs["temperature_decay"] = (t_end / t_start) ** (1.0 / anneal_steps)
+                    # regularization is handled via temperature in sinkhorn; drop to avoid unexpected kwarg
+                    strategy_kwargs.pop("regularization", None)
+                    if "num_iterations" in strategy_kwargs:
+                        strategy_kwargs["num_iters"] = strategy_kwargs.pop("num_iterations")
+                    # Map switching_cost -> stickiness, decay -> stickiness_decay
+                    if "switching_cost" in strategy_kwargs:
+                        strategy_kwargs["stickiness"] = strategy_kwargs.pop("switching_cost")
+                    if "decay" in strategy_kwargs:
+                        strategy_kwargs["stickiness_decay"] = strategy_kwargs.pop("decay")
+                    assignment_strategy = build_assignment_strategy(strategy_name, **strategy_kwargs)
+
                 loss_function = CryoEM_Images_GuidanceLossFunction(
                     image_pt_files=cryoimage_config.image_pt_files,
                     image_json_files=getattr(cryoimage_config, "image_json_files", None),
@@ -196,6 +233,7 @@ class ExperimentManager:
                     supervised_assignment_by_index=getattr(cryoimage_config, "supervised_assignment_by_index", False),
                     projection_batch_size=getattr(cryoimage_config, "projection_batch_size", None),
                     shuffle_projection_samples=getattr(cryoimage_config, "shuffle_projection_samples", True),
+                    assignment_strategy=assignment_strategy,
                 )
                 loss_functions.append(loss_function)
                 loss_weight = getattr(cryoimage_config, "weight", 1)
@@ -340,21 +378,34 @@ class ExperimentManager:
             weights.append(bond_length_loss_weight)
         
         # Add RMSD loss function if configured
-        if "cryoesp" in self.config.loss_function.loss_function_type:
-            cryoesp_config = self.config.loss_function.cryoesp_loss_function
-            rmsd_loss_config = getattr(self.config.loss_function, "rmsd_loss_function", None)
-            if rmsd_loss_config is not None:
-                rmsd_loss_sequence_indices = getattr(rmsd_loss_config, "rmsd_loss_sequence_indices", None)
-                rmsd_loss_weight = getattr(rmsd_loss_config, "weight", 1.0)
-                if rmsd_loss_sequence_indices is not None and len(rmsd_loss_sequence_indices) > 0:
-                    loss_functions.append(RMSDLossFunction(
-                        reference_pdb=cryoesp_config.reference_pdb,
+        # Works with cryoesp (single reference), cryoimage (multiple references), or standalone.
+        rmsd_loss_config = getattr(self.config.loss_function, "rmsd_loss_function", None)
+        if rmsd_loss_config is not None:
+            rmsd_loss_sequence_indices = getattr(rmsd_loss_config, "rmsd_loss_sequence_indices", None)
+            rmsd_loss_weight = getattr(rmsd_loss_config, "weight", 1.0)
+            if rmsd_loss_sequence_indices is not None and len(rmsd_loss_sequence_indices) > 0:
+                # Collect reference PDBs: explicit list > cryoimage refs > cryoesp ref
+                rmsd_reference_pdbs = list(getattr(rmsd_loss_config, "reference_pdbs", []) or [])
+                if not rmsd_reference_pdbs:
+                    cryoimage_cfg = getattr(self.config.loss_function, "cryoimage_loss_function", None)
+                    if cryoimage_cfg is not None:
+                        rmsd_reference_pdbs = list(getattr(cryoimage_cfg, "reference_pdbs", []) or [])
+                if not rmsd_reference_pdbs:
+                    cryoesp_cfg = getattr(self.config.loss_function, "cryoesp_loss_function", None)
+                    if cryoesp_cfg is not None:
+                        ref = getattr(cryoesp_cfg, "reference_pdb", None)
+                        if ref is not None:
+                            rmsd_reference_pdbs = [ref]
+
+                if rmsd_reference_pdbs:
+                    loss_functions.append(MultiReferenceRMSDLossFunction(
+                        reference_pdbs=rmsd_reference_pdbs,
                         mask=self.model_manager.resolved_pdb_to_full_mask,
                         sequences_dictionary=self.model_manager.sequences_dictionary,
                         chains_to_read=self.config.protein.chains_to_use,
                         rmsd_loss_sequence_indices=rmsd_loss_sequence_indices,
                         device=self.device,
-                        should_align_to_chains=self.config.protein.should_align_to_chains,
+                        should_align_to_chains=getattr(self.config.protein, "should_align_to_chains", None),
                         frozen_atoms_dict=getattr(self.model_manager, "frozen_atoms_dict", None),
                     ))
                     weights.append(rmsd_loss_weight)

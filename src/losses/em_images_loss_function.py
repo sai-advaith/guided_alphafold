@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader as TorchDataLoader
 
 from .abstract_loss_funciton import AbstractLossFunction
+from .assignment_strategies import AssignmentStrategy, HardAssignment
 from ..protenix.metrics.rmsd import self_aligned_rmsd
 from ..utils.cryoimage_renderer import (
     CryoImageDataset,
@@ -38,6 +39,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         supervised_assignment_by_index: bool = False,
         projection_batch_size: int | None = None,
         shuffle_projection_samples: bool = True,
+        assignment_strategy: AssignmentStrategy | None = None,
     ):
         self.device = torch.device(device)
         self._projection_log_every = log_projection_every
@@ -50,6 +52,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.use_resolved_atoms_only = use_resolved_atoms_only
         self.bfactor_override = None if bfactor_override is None else float(bfactor_override)
         self.supervised_assignment_by_index = bool(supervised_assignment_by_index)
+        self.assignment_strategy: AssignmentStrategy = assignment_strategy or HardAssignment()
         self.projection_batch_size = None if projection_batch_size is None else int(projection_batch_size)
         if self.projection_batch_size is not None and self.projection_batch_size <= 0:
             self.projection_batch_size = None
@@ -139,7 +142,10 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.last_assignment_margin_mean: float | None = None
         self.last_assignment_margin_min: float | None = None
         self.last_assignment_margin_max: float | None = None
-        self.last_assignment_mode: str = "supervised" if self.supervised_assignment_by_index else "dynamic"
+        self.last_assignment_mode: str = (
+            "supervised" if self.supervised_assignment_by_index
+            else type(self.assignment_strategy).__name__
+        )
 
         self._setup_fast_solver()
 
@@ -326,6 +332,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self,
         loss_matrix: torch.Tensor,
         gt_conformation_index: torch.Tensor,
+        step: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.supervised_assignment_by_index:
             assignments = gt_conformation_index.to(device=loss_matrix.device, dtype=torch.long)
@@ -336,10 +343,10 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
                     "Ground-truth conformation indices must be valid structure indices in supervised mode. "
                     f"Got range [{min_idx}, {max_idx}] for {loss_matrix.shape[1]} structures."
                 )
-        else:
-            assignments = loss_matrix.argmin(dim=1)
+            selected_losses = loss_matrix.gather(1, assignments.unsqueeze(1)).squeeze(1)
+            return assignments, selected_losses
 
-        selected_losses = loss_matrix.gather(1, assignments.unsqueeze(1)).squeeze(1)
+        selected_losses, assignments = self.assignment_strategy.assign(loss_matrix, step=step)
         return assignments, selected_losses
 
     def _assignment_margin(self, loss_matrix: torch.Tensor) -> torch.Tensor:
@@ -454,7 +461,10 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         self.last_assignment_margin_max = float(margin_values.max().item())
 
     def __call__(self, x_0_hat: torch.Tensor, time, structures=None, i=None, step=None):
-        self.last_assignment_mode = "supervised" if self.supervised_assignment_by_index else "dynamic"
+        self.last_assignment_mode = (
+            "supervised" if self.supervised_assignment_by_index
+            else type(self.assignment_strategy).__name__
+        )
         self.last_loss_per_conformation = {}
         self.last_rmsd_per_conformation = {}
         self.last_cosine_similarity_per_conformation = {}
@@ -497,7 +507,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         for batch in self._iter_projection_batches():
             loss_matrix, cosine_matrix = self._compute_loss_matrix_for_batch(aligned_structures, batch)
             gt_conformation_index = batch["conformation_index"].to(dtype=torch.long)
-            assignments, selected_losses = self._select_assignments(loss_matrix, gt_conformation_index)
+            assignments, selected_losses = self._select_assignments(loss_matrix, gt_conformation_index, step=step)
             selected_cosine = cosine_matrix.gather(1, assignments.unsqueeze(1)).squeeze(1)
 
             total_selected_loss = total_selected_loss + selected_losses.sum()
@@ -570,6 +580,9 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             log["cryoimage/assignment_margin_min"] = self.last_assignment_margin_min
         if self.last_assignment_margin_max is not None:
             log["cryoimage/assignment_margin_max"] = self.last_assignment_margin_max
+
+        log["cryoimage/assignment_strategy"] = self.last_assignment_mode
+        log.update(self.assignment_strategy.extra_wandb_log())
 
         for idx, value in self.last_loss_per_conformation.items():
             log[f"cryoimage/loss_conf_{idx}"] = float(value)

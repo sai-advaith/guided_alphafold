@@ -7,4 +7,5 @@ from .bond_length_loss_function import BondLengthLossFunction
 from .relax_times_loss_function import RelaxTimesLossFunction
 from .em_loss_function import CryoEM_ESP_GuidanceLossFunction
 from .rmsd_loss_function import RMSDLossFunction
+from .multi_reference_rmsd_loss import MultiReferenceRMSDLossFunction
 from .em_images_loss_function import CryoEM_Images_GuidanceLossFunction
