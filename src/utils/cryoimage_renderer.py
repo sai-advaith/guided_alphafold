@@ -29,20 +29,31 @@ def prepare_lattice_from_density_map(
     projection_axis: int,
     collapse_projection_axis: bool,
     device: torch.device | str,
+    grid_size_override: int | None = None,
+    pixel_size_override: float | None = None,
 ) -> tuple[Lattice, dict[str, Any]]:
     density_map = gemmi.read_ccp4_map(str(density_map_path))
-    D = density_map.grid.nu
-    maxsize = density_map.grid.unit_cell.a
-    pixel_size = maxsize / D
-    left_bottom = list(np.array(list(density_map.get_extent().minimum)) * maxsize)
-    right_upper = list(np.array(list(density_map.get_extent().maximum)) * maxsize)
+    D_map = density_map.grid.nu
+    maxsize_map = density_map.grid.unit_cell.a
+    pixel_size_map = maxsize_map / D_map
+    left_bottom_map = list(np.array(list(density_map.get_extent().minimum)) * maxsize_map)
+    right_upper_map = list(np.array(list(density_map.get_extent().maximum)) * maxsize_map)
+
+    D = grid_size_override if grid_size_override is not None else D_map
+    pixel_size = pixel_size_override if pixel_size_override is not None else pixel_size_map
+
+    # Recompute extent around the original map center when FOV changes.
+    center = [(lb + ru) / 2.0 for lb, ru in zip(left_bottom_map, right_upper_map)]
+    half_fov = D * pixel_size / 2.0
+    left_bottom = [c - half_fov for c in center]
+    right_upper = [c + half_fov for c in center]
 
     grid_dimensions = [D, D, D]
     voxel_sizes = [pixel_size, pixel_size, pixel_size]
     projection_depth = D * pixel_size
 
     if collapse_projection_axis:
-        center_on_axis = (left_bottom[projection_axis] + right_upper[projection_axis]) / 2.0
+        center_on_axis = center[projection_axis]
         grid_dimensions[projection_axis] = 1
         voxel_sizes[projection_axis] = projection_depth
         left_bottom[projection_axis] = center_on_axis
@@ -65,6 +76,8 @@ def prepare_lattice_from_density_map(
         "right_upper": right_upper,
         "D": D,
         "pixel_size": pixel_size,
+        "D_map": D_map,
+        "pixel_size_map": pixel_size_map,
         "sublattice_radius": sublattice_radius,
         "projection_axis": projection_axis,
         "projection_depth": projection_depth,
