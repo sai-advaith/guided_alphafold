@@ -103,6 +103,28 @@ def _parse_args() -> argparse.Namespace:
         help="Path to a CCP4 density map file. Grid dimensions and voxel size are read from this map.",
     )
     parser.add_argument(
+        "--grid-size",
+        type=int,
+        default=None,
+        help=(
+            "Override the number of voxels per axis (isotropic). "
+            "If not set, the value is read from the density map. "
+            "When grid-size * pixel-size differs from the map, the FOV adapts "
+            "while keeping the map center."
+        ),
+    )
+    parser.add_argument(
+        "--pixel-size",
+        type=float,
+        default=None,
+        help=(
+            "Override the voxel size in Angstroms. "
+            "If not set, the value is read from the density map. "
+            "When grid-size * pixel-size differs from the map, the FOV adapts "
+            "while keeping the map center."
+        ),
+    )
+    parser.add_argument(
         "--num-rotations",
         type=int,
         default=1000,
@@ -582,6 +604,8 @@ def _generate_dataset_for_pdb(
         projection_axis=axis,
         collapse_projection_axis=args.collapse_projection_axis,
         device=device,
+        grid_size_override=args.grid_size,
+        pixel_size_override=args.pixel_size,
     )
     if not args.collapse_projection_axis:
         depth = float(lattice.grid_dimensions[axis].item() * lattice.voxel_sizes_in_A[axis].item())
@@ -636,7 +660,12 @@ def _generate_dataset_for_pdb(
 
     pdb_id = _canonical_output_pdb_id(pdb_path)
     out_dir = Path(args.out_dir)
-    out_name = f"{pdb_id}_esp_projections_{args.num_rotations}.{args.output_format}"
+    suffix_parts = [f"{pdb_id}_esp_projections_{args.num_rotations}"]
+    if args.grid_size is not None:
+        suffix_parts.append(f"D{args.grid_size}")
+    if args.pixel_size is not None:
+        suffix_parts.append(f"ps{args.pixel_size}")
+    out_name = f"{'_'.join(suffix_parts)}.{args.output_format}"
     output_path = out_dir / out_name
 
     meta = {
