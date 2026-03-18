@@ -218,6 +218,25 @@ def _parse_args() -> argparse.Namespace:
         help="Clear CUDA cache every N iterations (0 disables).",
     )
     parser.add_argument(
+        "--ctf",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply the CTF forward model (exit wavelets + CTF convolution) to projections. "
+            "Uses default Titan Krios 300kV parameters."
+        ),
+    )
+    parser.add_argument(
+        "--dose",
+        type=float,
+        default=None,
+        help=(
+            "Electron dose (electrons per Angstrom^2) for Poisson noise. "
+            "Typical values: 40-80. Only applied when --ctf is also set. "
+            "If not set, no noise is added."
+        ),
+    )
+    parser.add_argument(
         "--align-to-reference-pdb",
         type=str,
         default=None,
@@ -296,7 +315,6 @@ def _save_outputs(
             {
                 "projections": projections,
                 "rotations": rotations,
-                "meta": meta,
             },
             output_path,
         )
@@ -631,6 +649,8 @@ def _generate_dataset_for_pdb(
         device="cpu",
     )
 
+    ctf_params = CryoImageRenderer.default_ctf_params() if args.ctf else None
+
     fast_renderer = CryoImageRenderer.from_atom_stack(
         atom_stack=atom_stack,
         lattice=lattice,
@@ -638,6 +658,7 @@ def _generate_dataset_for_pdb(
         collapse_projection_axis=args.collapse_projection_axis,
         use_checkpointing=False,
         use_autocast=False,
+        ctf_params=ctf_params,
     )
 
     rotation_iter = _progress(
@@ -651,6 +672,10 @@ def _generate_dataset_for_pdb(
             atom_stack,
             fast_renderer,
         )
+        if args.dose is not None and ctf_params is not None:
+            projection = CryoImageRenderer.add_poisson_noise(
+                projection.unsqueeze(0), args.dose, lattice_meta["pixel_size"]
+            ).squeeze(0)
         projections[idx] = projection.detach().cpu()
         rotations[idx] = rotation_matrix
 
@@ -665,6 +690,11 @@ def _generate_dataset_for_pdb(
         suffix_parts.append(f"D{args.grid_size}")
     if args.pixel_size is not None:
         suffix_parts.append(f"ps{args.pixel_size}")
+    if ctf_params is not None:
+        defocus_A = ctf_params.delta_f * 1e10  # convert m to Angstrom
+        suffix_parts.append(f"ctf_df{defocus_A:.0f}A")
+    if args.dose is not None and ctf_params is not None:
+        suffix_parts.append(f"dose{args.dose:g}")
     out_name = f"{'_'.join(suffix_parts)}.{args.output_format}"
     output_path = out_dir / out_name
 
@@ -678,7 +708,22 @@ def _generate_dataset_for_pdb(
         "atomic_radius": args.atomic_radius,
         "device": str(device),
         "lattice": lattice_meta,
+        "ctf_enabled": args.ctf,
+        "dose": args.dose,
     }
+    if ctf_params is not None:
+        meta["ctf_params"] = {
+            "delta_f": ctf_params.delta_f,
+            "A1": ctf_params.A1,
+            "alpha_1": ctf_params.alpha_1,
+            "C_s": ctf_params.C_s,
+            "C_c": ctf_params.C_c,
+            "delta_E": ctf_params.delta_E,
+            "voltage_kV": ctf_params.voltage_kV,
+            "alpha_i": ctf_params.alpha_i,
+            "d_ap": ctf_params.d_ap,
+            "f": ctf_params.f,
+        }
 
     if resolved_info is not None:
         meta["resolved_atoms_only"] = True

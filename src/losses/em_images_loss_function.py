@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from .abstract_loss_funciton import AbstractLossFunction
 from .assignment_strategies import AssignmentStrategy, HardAssignment
 from ..protenix.metrics.rmsd import self_aligned_rmsd
+from cryoforward.ctf import CTFParams
+
 from ..utils.cryoimage_renderer import (
     CryoImageDataset,
     CryoImageRenderer,
@@ -40,6 +42,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         projection_batch_size: int | None = None,
         shuffle_projection_samples: bool = True,
         assignment_strategy: AssignmentStrategy | None = None,
+        ctf_params: CTFParams | None = None,
     ):
         self.device = torch.device(device)
         self._projection_log_every = log_projection_every
@@ -57,6 +60,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
         if self.projection_batch_size is not None and self.projection_batch_size <= 0:
             self.projection_batch_size = None
         self.shuffle_projection_samples = bool(shuffle_projection_samples)
+        self.ctf_params = ctf_params
 
         if not image_pt_files:
             raise ValueError("image_pt_files must be a non-empty list.")
@@ -157,6 +161,14 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
             raise ValueError(
                 f"Rendered and GT projections must have matching shapes, got {rendered.shape} and {gt.shape}."
             )
+        if self.ctf_params is not None:
+            # MSE on mean-centered images: removes ~1.0 DC background,
+            # exposes structural modulation for gradient signal.
+            r_flat = rendered.flatten(start_dim=1)
+            g_flat = gt.flatten(start_dim=1)
+            r_centered = r_flat - r_flat.mean(dim=1, keepdim=True)
+            g_centered = g_flat - g_flat.mean(dim=1, keepdim=True)
+            return (r_centered - g_centered).square().mean(dim=1)
         return (rendered - gt).square().flatten(start_dim=1).mean(dim=1)
 
     def _projection_cosine_similarity_per_sample(
@@ -166,6 +178,10 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
     ) -> torch.Tensor:
         rendered_flat = rendered.flatten(start_dim=1)
         gt_flat = gt.flatten(start_dim=1)
+        if self.ctf_params is not None:
+            # Use centered cosine similarity (= NCC) to ignore DC background
+            rendered_flat = rendered_flat - rendered_flat.mean(dim=1, keepdim=True)
+            gt_flat = gt_flat - gt_flat.mean(dim=1, keepdim=True)
         return F.cosine_similarity(rendered_flat, gt_flat, dim=1, eps=1e-8)
 
     def _setup_fast_solver(self) -> None:
@@ -199,6 +215,7 @@ class CryoEM_Images_GuidanceLossFunction(AbstractLossFunction):
                     device=self.device,
                     use_checkpointing=False,
                     use_autocast=False,
+                    ctf_params=self.ctf_params,
                 )
                 renderers_for_conformation.append(renderer)
 

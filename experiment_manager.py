@@ -217,6 +217,16 @@ class ExperimentManager:
                         strategy_kwargs["stickiness_decay"] = strategy_kwargs.pop("decay")
                     assignment_strategy = build_assignment_strategy(strategy_name, **strategy_kwargs)
 
+                # Build CTF params if enabled in config
+                ctf_params = None
+                if getattr(cryoimage_config, "ctf_enabled", False):
+                    from src.utils.cryoimage_renderer import CryoImageRenderer
+                    ctf_params = CryoImageRenderer.default_ctf_params()
+                    # Allow overriding defocus from config
+                    ctf_defocus = getattr(cryoimage_config, "ctf_defocus", None)
+                    if ctf_defocus is not None:
+                        ctf_params.delta_f = float(ctf_defocus)
+
                 loss_function = CryoEM_Images_GuidanceLossFunction(
                     image_pt_files=cryoimage_config.image_pt_files,
                     image_json_files=getattr(cryoimage_config, "image_json_files", None),
@@ -234,6 +244,7 @@ class ExperimentManager:
                     projection_batch_size=getattr(cryoimage_config, "projection_batch_size", None),
                     shuffle_projection_samples=getattr(cryoimage_config, "shuffle_projection_samples", True),
                     assignment_strategy=assignment_strategy,
+                    ctf_params=ctf_params,
                 )
                 loss_functions.append(loss_function)
                 loss_weight = getattr(cryoimage_config, "weight", 1)

@@ -11,6 +11,8 @@ from torch.utils.data import Dataset as TorchDataset
 
 from cryoforward.atom_stack import AtomStack
 from cryoforward.cryoesp_calculator import setup_fast_esp_solver
+import math
+from cryoforward.ctf import CTFParams, compute_ctf_2d
 from cryoforward.lattice import Lattice
 
 
@@ -178,6 +180,9 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
         projection_axis = cls._resolve_projection_axis(meta)
         collapse_projection_axis = bool(meta.get("lattice", {}).get("collapse_projection_axis", True))
 
+        dose = meta.get("dose")
+        has_poisson_noise = dose is not None and meta.get("ctf_enabled", False)
+
         return {
             "projections": data["projections"].to(device),
             "rotations": data["rotations"].to(device),
@@ -185,6 +190,7 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
             "projection_axis": projection_axis,
             "collapse_projection_axis": collapse_projection_axis,
             "meta": meta,
+            "has_poisson_noise": has_poisson_noise,
         }
 
     @classmethod
@@ -221,6 +227,11 @@ class CryoImageDataset(TorchDataset[dict[str, Any]]):
     def conformations(self) -> list[dict[str, Any]]:
         return self._conformations
 
+    @property
+    def has_poisson_noise(self) -> bool:
+        """True if all conformations were generated with Poisson noise (dose was set)."""
+        return all(c.get("has_poisson_noise", False) for c in self._conformations)
+
     def __getitem__(self, idx: int) -> dict[str, Any]:
         conf_idx, rot_idx = self._index[idx]
         conformation = self._conformations[conf_idx]
@@ -244,6 +255,7 @@ class CryoImageRenderer:
         projection_axis: int,
         collapse_projection_axis: bool,
         fast_solver,
+        ctf_params: CTFParams | None = None,
     ) -> None:
         self.lattice = lattice
         self.projection_axis = int(projection_axis)
@@ -251,6 +263,65 @@ class CryoImageRenderer:
         _, self._compute_batch_from_coords = fast_solver
         self._grid_dims = tuple(int(x) for x in lattice.grid_dimensions.tolist())
         self._projection_depth = float(lattice.voxel_sizes_in_A[self.projection_axis].item())
+
+        self.ctf_params = ctf_params
+        self._ctf_2d: torch.Tensor | None = None
+        if ctf_params is not None:
+            freq_grid = self.lattice.frequency_grid_in_m_2d  # (D*D, 2)
+            ctf_flat = compute_ctf_2d(freq_grid[:, 0], freq_grid[:, 1], ctf_params)
+            proj_shape = projection_shape(self._grid_dims, self.projection_axis)
+            self._ctf_2d = torch.fft.ifftshift(
+                ctf_flat.reshape(proj_shape)
+            ).to(lattice.device)
+
+    @classmethod
+    def default_ctf_params(cls) -> CTFParams:
+        return CTFParams(
+            delta_f=17136.9570315e-10,
+            A1=124.1328125e-10,
+            alpha_1=4.574108603237696,
+            C_s=3.00e-3,
+            C_c=2.00e-3,
+            delta_E=0.7,
+            voltage_kV=300.0,
+            alpha_i=0.1e-3,
+            d_ap=100e-6,
+            f=2.0e-3,
+            q_cuton=None,
+            A=None,
+            objective_plane_z_A=140.0,
+            slice_thickness_delta_z_A=5.0,
+        )
+
+    @staticmethod
+    def _electron_wavelength_m(voltage_kv: float) -> float:
+        """Relativistic electron wavelength in meters."""
+        h = 6.626e-34
+        m_e = 9.109e-31
+        e = 1.602e-19
+        c = 3.0e8
+        V = voltage_kv * 1e3
+        return h / math.sqrt(2 * m_e * e * V * (1 + e * V / (2 * m_e * c ** 2)))
+
+    def apply_forward_model(self, projections: torch.Tensor) -> torch.Tensor:
+        """Convert raw ESP projections (B, D, D) to cryo-EM images via exit wavelets + CTF."""
+        if self._ctf_2d is None:
+            raise RuntimeError("Forward model requires ctf_params to be set.")
+
+        # Exit wavelets: 1e10 * exp(i * lambda_A * V_z)  where lambda_A = lambda_m * 1e10
+        lam_m = self._electron_wavelength_m(self.ctf_params.voltage_kV)
+        lam_A = lam_m * 1e10  # wavelength in Angstroms
+        exit_wave = 1e10 * torch.exp(1j * lam_A * projections)  # (B, D, D) complex
+
+        # CTF convolution in Fourier space
+        convolved = torch.fft.ifft2(torch.fft.fft2(exit_wave) * self._ctf_2d)
+        return convolved.abs() ** 2 / 1e20  # (B, D, D), real, ~1.0 + tiny modulation
+
+    @staticmethod
+    def add_poisson_noise(images: torch.Tensor, dose_per_A2: float, pixel_size_A: float) -> torch.Tensor:
+        """Apply Poisson noise. dose_per_A2 is electrons/A^2 (typical: 40-80), pixel_size_A in Angstroms."""
+        dose_per_pixel = dose_per_A2 * pixel_size_A ** 2
+        return torch.poisson(images * dose_per_pixel)
 
     @classmethod
     def from_atom_stack(
@@ -262,6 +333,7 @@ class CryoImageRenderer:
         collapse_projection_axis: bool,
         use_checkpointing: bool = False,
         use_autocast: bool = False,
+        ctf_params: CTFParams | None = None,
     ) -> "CryoImageRenderer":
         fast_solver = setup_fast_esp_solver(
             atom_stack,
@@ -275,6 +347,7 @@ class CryoImageRenderer:
             projection_axis=projection_axis,
             collapse_projection_axis=collapse_projection_axis,
             fast_solver=fast_solver,
+            ctf_params=ctf_params,
         )
 
     @classmethod
@@ -290,6 +363,7 @@ class CryoImageRenderer:
         device: torch.device | str,
         use_checkpointing: bool = False,
         use_autocast: bool = False,
+        ctf_params: CTFParams | None = None,
     ) -> "CryoImageRenderer":
         if coords.ndim == 2:
             coords = coords.unsqueeze(0)
@@ -318,6 +392,7 @@ class CryoImageRenderer:
             collapse_projection_axis=collapse_projection_axis,
             use_checkpointing=use_checkpointing,
             use_autocast=use_autocast,
+            ctf_params=ctf_params,
         )
 
     @staticmethod
@@ -349,6 +424,7 @@ class CryoImageRenderer:
         rotations: torch.Tensor,
         max_rotations_per_batch: int | None = None,
         occupancies: torch.Tensor | None = None,
+        apply_ctf: bool = True,
     ) -> torch.Tensor:
         batch = coords.shape[0]
         if bfactors.ndim == 1:
@@ -421,4 +497,7 @@ class CryoImageRenderer:
 
             projections.append(projection)
 
-        return torch.cat(projections, dim=0)
+        result = torch.cat(projections, dim=0)
+        if apply_ctf and self._ctf_2d is not None:
+            result = self.apply_forward_model(result)
+        return result
