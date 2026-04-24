@@ -591,9 +591,42 @@ def get_backbone_ca_mask(pdb_file, device=torch.device("cpu")):
     return torch.tensor(backbone_mask, dtype=bool), torch.tensor(ca_mask, dtype=bool)
 
 
+def _read_a3m_query(a3m_path):
+    # Return the first sequence record in an a3m (the query). ColabFold-style files may start with a "#len\tcopies" comment.
+    with open(a3m_path) as f:
+        saw_header = False
+        for line in f:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(">"):
+                saw_header = True
+                continue
+            if saw_header:
+                return line
+    return None
+
+
 def query_msa_server(msa_full_save_dir, sequence_dictionary):
-    if not os.path.exists(msa_full_save_dir):
-        os.makedirs(msa_full_save_dir, exist_ok=True) 
+    # Cache is valid only if both a3m files exist AND non_pairing.a3m's first record matches the query —
+    # guards against crashed-mid-write dirs and stale caches written for a different sequence.
+    cache_ok = os.path.exists(msa_full_save_dir)
+    if cache_ok:
+        for i, entry in enumerate(sequence_dictionary):
+            if entry["sequence_type"] != "proteinChain":
+                continue
+            chain_dir = os.path.join(msa_full_save_dir, f"msa/{i+1}")
+            non_pairing = os.path.join(chain_dir, "non_pairing.a3m")
+            pairing = os.path.join(chain_dir, "pairing.a3m")
+            if not (os.path.exists(non_pairing) and os.path.exists(pairing)):
+                cache_ok = False
+                break
+            first_seq = _read_a3m_query(non_pairing)
+            if first_seq is None or first_seq.upper() != entry["sequence"].upper():
+                cache_ok = False
+                break
+    if not cache_ok:
+        os.makedirs(msa_full_save_dir, exist_ok=True)
         # Only protein chain sequences are needed for the MSA
         sequences = [
             dictionary["sequence"] for dictionary in sequence_dictionary if dictionary["sequence_type"] == "proteinChain"

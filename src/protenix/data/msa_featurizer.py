@@ -15,6 +15,7 @@
 import json
 import os
 import shutil
+import string
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from copy import deepcopy
@@ -39,6 +40,7 @@ from ..data.msa_utils import (
     merge_features_from_prot_rna,
     msa_parallel,
     pair_and_merge,
+    parse_a3m,
     rna_merge,
 )
 from ..data.tokenizer import TokenArray
@@ -1050,6 +1052,23 @@ class InferenceMSAFeaturizer(object):
                 assert opexists(
                     msa_dir
                 ), f"The provided precomputed MSA path of entities {entity_id_list} does not exists: \n{msa_dir}"
+                non_pairing_path = opjoin(msa_dir, "non_pairing.a3m")
+                assert opexists(non_pairing_path), (
+                    f"Missing non_pairing.a3m for entities {entity_id_list} in {msa_dir}"
+                )
+                first_sequences, _ = parse_a3m(non_pairing_path, seq_limit=1)
+                assert len(first_sequences) > 0, (
+                    f"Empty non_pairing.a3m for entities {entity_id_list}: {non_pairing_path}"
+                )
+                top_row = first_sequences[0].translate(
+                    str.maketrans("", "", string.ascii_lowercase)
+                )
+                assert top_row == sequence, (
+                    f"Top row of {non_pairing_path} does not match the query sequence "
+                    f"for entities {entity_id_list}.\n"
+                    f"  Query ({len(sequence)}): {sequence}\n"
+                    f"  Top   ({len(top_row)}): {top_row}"
+                )
                 msa_dirs[idx] = msa_dir
             else:
                 pairing_db_fpath = msa_info.get("pairing_db_fpath", None)
