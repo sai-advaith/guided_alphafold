@@ -16,6 +16,7 @@ protein:
   sequences:
     - count: 1
       sequence: "QATSQPINFQVQKDGSSEKSHMDDYMQHPGKVIKQNNKYYFQTVLNNASFWKEYKFYNANNQELATTVVNDNKKADTRTINVAVEPGYKSLTTKVHIVVPQINYNHRYTTHLEFEKAIPTLA"
+      sequence_type: "proteinChain"
   pdb_id: "2o1a"
   chains_to_use: [0]
   residue_range: [[34, 37]]

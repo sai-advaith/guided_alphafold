@@ -17,6 +17,7 @@ protein:
   sequences: 
     - sequence: "PLVNIYNCSGVQVGDNNYLTMQQT"
       count: 3
+      sequence_type: "proteinChain"
   pdb_id: "7dac"
   assembly_identifier: "amyloid_7DAC_short_mmseq2"
   chains_to_use: [0, 1, 2] # which chains to use from the assembly/the pdb

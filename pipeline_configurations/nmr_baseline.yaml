@@ -15,6 +15,7 @@ protein:
   sequences: 
     - sequence: "GYIPEAPRDGQAYVRKDGEWVLLSTFL"
       count: 1 # this way, we can be especifying our sequences and the corresponding things etc. We ween an assembly specifier too..!
+      sequence_type: "proteinChain"
   pdb_id: "1u0p"
   assembly_identifier: "1u0p_mono" # assembly identifier to find the cached dictionary, msa embeddingss, etc.
   chains_to_use: [0] # which chains to use from the assembly/the pdb
