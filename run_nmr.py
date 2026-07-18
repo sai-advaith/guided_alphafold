@@ -17,6 +17,18 @@ def main():
     parser.add_argument('--amide_relax_file', type=str, required=False, default=None)
     parser.add_argument('--methyl_relax_file', type=str, required=False, default=None)
     parser.add_argument('--device', type=str, required=False, default="cuda:0")
+    parser.add_argument(
+        '--run-receipts',
+        action='store_true',
+        default=False,
+        help='Write SHA-256 chained run receipts for post-hoc verification',
+    )
+    parser.add_argument(
+        '--deterministic-mode',
+        action='store_true',
+        default=False,
+        help='Stricter deterministic path + run receipts (seed_experiment still always runs)',
+    )
     args = parser.parse_args()
 
     # Prepare config file
@@ -25,11 +37,16 @@ def main():
     # Loading the config file and merging it with the arguments
     config = load_config(config_file_path)
 
-    # Seeding the experiment
+    # Seeding the experiment (unchanged baseline reproducibility)
     ExperimentManager.seed_experiment(config.general.seed)
 
     # Running the experiment
-    pipeline = ExperimentManager(config, args.device)
+    pipeline = ExperimentManager(
+        config,
+        args.device,
+        run_receipts=args.run_receipts or args.deterministic_mode,
+        deterministic_mode=args.deterministic_mode,
+    )
     pipeline.run()
 
     # Metrics!

@@ -14,15 +14,44 @@ from src.utils.io import load_pdb_atom_locations, get_sampler_pdb_inputs, delete
 from src.utils.io import load_config, namespace_to_dict, query_msa_server
 from src.utils.non_diffusion_model_manager import ProtenixModelManager
 from src.utils.non_diffusion_model_manager import save_structure_full
+from src.utils.run_receipts import (
+    ReceiptLedger,
+    deterministic_mode_enabled,
+    enable_torch_deterministic,
+    receipts_enabled,
+)
 from src.losses import * 
 
 class ExperimentManager:
-    def __init__(self, config, device, config_file_path=None):
+    def __init__(
+        self,
+        config,
+        device,
+        config_file_path=None,
+        *,
+        run_receipts=None,
+        deterministic_mode=None,
+    ):
         # general
         self.device = device
         self.config_file_path = config_file_path
         self.config = config
         self.name = f"{self.config.general.name}_{self.config.protein.pdb_id}"
+
+        # Opt-in audited path. Existing seed_experiment() behavior is unchanged when flags are off.
+        cfg_det = getattr(getattr(config, "general", None), "deterministic_mode", None)
+        cfg_rec = getattr(getattr(config, "general", None), "run_receipts", None)
+        self.deterministic_mode = deterministic_mode_enabled(
+            deterministic_mode if deterministic_mode is not None else cfg_det
+        )
+        # Receipts default on when deterministic_mode is requested; can also be enabled alone.
+        if run_receipts is not None:
+            self.run_receipts = bool(run_receipts)
+        elif cfg_rec is not None:
+            self.run_receipts = bool(cfg_rec)
+        else:
+            self.run_receipts = receipts_enabled(self.deterministic_mode or None)
+        self.receipt_ledger = None
 
         self.msa_full_save_dir = None
         self.query_msa_server()
@@ -36,7 +65,33 @@ class ExperimentManager:
         else:
             self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.general.name)
 
-        os.makedirs(self.experiment_save_dir, exist_ok=True)      
+        os.makedirs(self.experiment_save_dir, exist_ok=True)
+
+        if self.deterministic_mode:
+            seed = int(getattr(self.config.general, "seed", 0) or 0)
+            enable_torch_deterministic(seed)
+            os.environ["GUIDED_AF_DETERMINISTIC"] = "1"
+
+        if self.run_receipts or self.deterministic_mode:
+            receipt_dir = os.path.join(self.experiment_save_dir, "receipts")
+            self.receipt_ledger = ReceiptLedger(receipt_dir, run_name=self.name)
+            self.receipt_ledger.record_genesis(
+                {
+                    "pdb_id": getattr(self.config.protein, "pdb_id", None),
+                    "seed": getattr(self.config.general, "seed", None),
+                    "deterministic_mode": bool(self.deterministic_mode),
+                    "diffusion_N": getattr(self.config.model_manager, "diffusion_N", None),
+                    "N_cycle": getattr(self.config.model_manager, "N_cycle", None),
+                    "batch_size": getattr(self.config.general, "batch_size", None),
+                    "use_msa": getattr(self.config.model_manager, "use_msa", None),
+                }
+            )
+            # Paths/timestamps are observations only (not in the chained payload)
+            self.receipt_ledger.observe(
+                "run_start",
+                {"experiment_save_dir": self.experiment_save_dir, "device": str(device)},
+            )
+            print(f"[run-receipts] enabled; ledger -> {receipt_dir}")
 
     def _setup_wandb(self):
         if self.config.wandb.login_key is not None:
@@ -203,7 +258,13 @@ class ExperimentManager:
         if self.config.loss_function.violation_loss_weight > 0:
             loss_functions.append(ViolationLossFunction(self.model_manager.atom_array))
             weights.append(self.config.loss_function.violation_loss_weight)
-        if self.config.loss_function.bond_length_loss_weight > 0 or self.config.loss_function.cryoesp_loss_function.log_bond_length_loss:
+        cryoesp_cfg = getattr(self.config.loss_function, "cryoesp_loss_function", None)
+        cryo_log_bond = (
+            bool(getattr(cryoesp_cfg, "log_bond_length_loss", False))
+            if cryoesp_cfg is not None
+            else False
+        )
+        if self.config.loss_function.bond_length_loss_weight > 0 or cryo_log_bond:
             loss_functions.append(BondLengthLossFunction(self.model_manager.atom_array, self.device))
             weights.append(self.config.loss_function.bond_length_loss_weight)
 
@@ -244,11 +305,15 @@ class ExperimentManager:
                     bfactors=esp_loss_function_obj.bfactor_gt
                 )
         elif "nmr" in self.config.loss_function.loss_function_type:
-            # Saving pdbs 
+            # Saving pdbs
             for i in range(structures.shape[0]):
                 save_structure_full(
-                    structures[i].cpu(), self.model_manager.full_sequences, self.model_manager.atom_array, f"{folder_path}/{name}_{i}.pdb",
-                    bfactors= None
+                    structures[i].cpu(),
+                    self.model_manager.full_sequences,
+                    self.model_manager.sequence_types,
+                    self.model_manager.atom_array,
+                    f"{folder_path}/{name}_{i}.pdb",
+                    bfactors=None,
                 )
         else:
             raise ValueError(f"The loss function type {self.config.loss_function.loss_function_type} is not a valid option")
@@ -301,6 +366,13 @@ class ExperimentManager:
                     if new_x_0_hat is not None:
                         wandb_log = self.loss_function.wandb_log(new_x_0_hat)
                         x_0_hat = new_x_0_hat
+                    if self.receipt_ledger is not None:
+                        self.receipt_ledger.record_scalar(
+                            "experimental_likelihood",
+                            float(loss_value.detach().cpu().item()),
+                            stage_index=int(step),
+                            meta={"diffusion_index": int(i)},
+                        )
                     loss_value.backward()
                     steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
                 
@@ -319,16 +391,43 @@ class ExperimentManager:
                 # structures = self.model_manager.get_x_noisy(structures, i + 1)
                 structures = self.model_manager.get_x_noisy(structures, start_index=start_idx, end_index=end_idx)
             structures = structures.detach().clone()
+            if self.receipt_ledger is not None and (
+                step % max(1, int(getattr(self.config.general, "receipt_every_n_steps", 50))) == 0
+                or i == (self.config.model_manager.diffusion_N - 1)
+            ):
+                self.receipt_ledger.record_tensor(
+                    "diffusion_structures",
+                    structures,
+                    stage_index=int(step),
+                    meta={"diffusion_index": int(i)},
+                )
             if wandb_log is not None and self.config.wandb.login_key is not None:
                 wandb.log(wandb_log)
         return structures
 
     def run(self):
         latents = self.get_initial_latents()
+        if self.receipt_ledger is not None:
+            self.receipt_ledger.record_tensor("initial_latents", latents, stage_index=0)
 
         structures = self.run_full_diffusion_process(latents)
         sub_folder_name = "diffusion_process"
         self.save_state(structures, self.config.protein.pdb_id[:4], os.path.join(self.experiment_save_dir, sub_folder_name))
+        if self.receipt_ledger is not None:
+            self.receipt_ledger.record_tensor("final_ensemble", structures, stage_index=None)
+            manifest = self.receipt_ledger.finalize(
+                extra={
+                    "pdb_id": getattr(self.config.protein, "pdb_id", None),
+                    "seed": getattr(self.config.general, "seed", None),
+                    "deterministic_mode": bool(self.deterministic_mode),
+                    "run_receipts": True,
+                }
+            )
+            print(
+                f"[run-receipts] manifest: {self.receipt_ledger.manifest_path} "
+                f"chain={manifest.get('chain_sha256')} "
+                f"numerical_stability={manifest.get('numerical_stability_status')}"
+            )
 
         # Density specific!
         if self.density_loss_function is not None:
