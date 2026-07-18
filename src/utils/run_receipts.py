@@ -17,6 +17,7 @@ import json
 import math
 import os
 import platform
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,13 @@ import torch
 DETERMINISTIC_ENV = "GUIDED_AF_DETERMINISTIC"
 RECEIPTS_ENV = "GUIDED_AF_RUN_RECEIPTS"
 SCHEMA_VERSION = 1
+
+
+def sanitize_run_name(run_name: str) -> str:
+    """Make a run name safe for use as a single path component / filename stem."""
+    name = str(run_name or "guided_run").replace(os.sep, "_").replace("/", "_").replace("\\", "_")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return name or "guided_run"
 
 
 def sha256_bytes_hex(data: bytes) -> str:
@@ -159,25 +167,25 @@ class ReceiptLedger:
 
     def __init__(self, out_dir: str, run_name: str = "guided_run"):
         self.out_dir = out_dir
-        self.run_name = run_name
+        self.run_name = sanitize_run_name(run_name)
         self.events: List[ReceiptEvent] = []
         self._prev: Optional[str] = None
         os.makedirs(out_dir, exist_ok=True)
-        self.jsonl_path = os.path.join(out_dir, f"{run_name}_receipts.jsonl")
+        self.jsonl_path = os.path.join(out_dir, f"{self.run_name}_receipts.jsonl")
         self.observations_path = os.path.join(
-            out_dir, f"{run_name}_observations.jsonl"
+            out_dir, f"{self.run_name}_observations.jsonl"
         )
         self.manifest_path = os.path.join(
-            out_dir, f"{run_name}_receipt_manifest.json"
+            out_dir, f"{self.run_name}_receipt_manifest.json"
         )
-        open(self.jsonl_path, "w").close()
-        open(self.observations_path, "w").close()
+        open(self.jsonl_path, "w", encoding="utf-8").close()
+        open(self.observations_path, "w", encoding="utf-8").close()
 
     def _append_event(self, event: ReceiptEvent) -> str:
         event.compute_receipt()
         self.events.append(event)
         self._prev = event.receipt_sha256
-        with open(self.jsonl_path, "a") as f:
+        with open(self.jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(event), sort_keys=True) + "\n")
         return event.receipt_sha256
 
@@ -188,7 +196,7 @@ class ReceiptLedger:
             "data": data,
             "observed_utc": datetime.now(timezone.utc).isoformat(),
         }
-        with open(self.observations_path, "a") as f:
+        with open(self.observations_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, sort_keys=True) + "\n")
 
     def record_genesis(self, payload: Optional[Dict[str, Any]] = None) -> str:
@@ -293,7 +301,7 @@ class ReceiptLedger:
                 "n_events": len(self.events),
             },
         )
-        with open(self.manifest_path, "w") as f:
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, sort_keys=True)
         return manifest
 
@@ -304,7 +312,7 @@ def verify_manifest(manifest_path: str) -> Dict[str, Any]:
 
     Returns a summary dict. Raises AssertionError on chain/event mismatch.
     """
-    with open(manifest_path) as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     events = manifest.get("events") or []

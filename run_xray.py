@@ -44,16 +44,21 @@ def main():
     guided_config_file_path = preprocess_xray_inputs(args.pdb_id.lower(), args.chain_id, args.sub_seq, args.input_directory, args.output_directory,  args.ccp4_setup_sh, args.phenix_setup_sh, args.wandb_key, args.wandb_project, args.map_type)
     if guided_config_file_path is not None:
         config = load_config(guided_config_file_path)
+        use_audited = bool(args.run_receipts or args.deterministic_mode)
 
-        # Seeding the experiment
-        ExperimentManager.seed_experiment(config.general.seed)
-
-        pipeline = ExperimentManager(
-            config,
-            args.device,
-            run_receipts=args.run_receipts or args.deterministic_mode,
-            deterministic_mode=args.deterministic_mode,
-        )
+        # Preserve upstream baseline order (construct, then seed) when flags are off.
+        # When audited flags are on, seed first so model construction sees the same seed.
+        if use_audited:
+            ExperimentManager.seed_experiment(config.general.seed)
+            pipeline = ExperimentManager(
+                config,
+                args.device,
+                run_receipts=True,
+                deterministic_mode=args.deterministic_mode,
+            )
+        else:
+            pipeline = ExperimentManager(config, args.device)
+            ExperimentManager.seed_experiment(config.general.seed)
 
         # Running the experiment
         print("Running guidance!")

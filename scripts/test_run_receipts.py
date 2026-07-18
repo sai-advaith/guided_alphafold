@@ -13,7 +13,12 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.utils.run_receipts import ReceiptLedger, sha256_json_hex, verify_manifest
+from src.utils.run_receipts import (
+    ReceiptLedger,
+    sanitize_run_name,
+    sha256_json_hex,
+    verify_manifest,
+)
 
 
 def test_chain_is_stable_and_verifiable() -> None:
@@ -75,8 +80,20 @@ def test_canonical_json() -> None:
     assert a == b
 
 
+def test_sanitize_run_name() -> None:
+    assert "/" not in sanitize_run_name("a/b\\c")
+    assert os.sep not in sanitize_run_name(f"x{os.sep}y")
+    with tempfile.TemporaryDirectory() as td:
+        led = ReceiptLedger(td, run_name="nested/name")
+        assert os.path.dirname(led.jsonl_path) == td
+        assert "nested" in led.run_name or "_" in led.run_name
+
+
 if __name__ == "__main__":
+    import os
+
     test_canonical_json()
+    test_sanitize_run_name()
     test_chain_is_stable_and_verifiable()
     test_non_finite_scalar_flagged()
     test_tamper_detection()

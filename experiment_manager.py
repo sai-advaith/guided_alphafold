@@ -53,6 +53,12 @@ class ExperimentManager:
             self.run_receipts = receipts_enabled(self.deterministic_mode or None)
         self.receipt_ledger = None
 
+        # Apply stricter determinism before any MSA / model / CUDA work when requested.
+        if self.deterministic_mode:
+            seed = int(getattr(self.config.general, "seed", 0) or 0)
+            enable_torch_deterministic(seed)
+            os.environ["GUIDED_AF_DETERMINISTIC"] = "1"
+
         self.msa_full_save_dir = None
         self.query_msa_server()
         self.model_manager = self._get_model_manager()
@@ -66,11 +72,6 @@ class ExperimentManager:
             self.experiment_save_dir = os.path.join(self.config.general.output_folder, self.config.general.name)
 
         os.makedirs(self.experiment_save_dir, exist_ok=True)
-
-        if self.deterministic_mode:
-            seed = int(getattr(self.config.general, "seed", 0) or 0)
-            enable_torch_deterministic(seed)
-            os.environ["GUIDED_AF_DETERMINISTIC"] = "1"
 
         if self.run_receipts or self.deterministic_mode:
             receipt_dir = os.path.join(self.experiment_save_dir, "receipts")
