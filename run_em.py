@@ -28,6 +28,18 @@ def main():
     parser.add_argument('--wandb_key', type=str, default=None, help='wandb key')
     parser.add_argument('--wandb_project', type=str, default=None, help='wandb project name')
     parser.add_argument('--device', type=str, default='cuda:0', help='device')
+    parser.add_argument(
+        '--run-receipts',
+        action='store_true',
+        default=False,
+        help='Write SHA-256 chained run receipts for post-hoc verification',
+    )
+    parser.add_argument(
+        '--deterministic-mode',
+        action='store_true',
+        default=False,
+        help='Stricter deterministic path + run receipts (seed_experiment still always runs)',
+    )
     args = parser.parse_args()
     
     print(f"Running structure fitting for PDB: {args.pdb_id}, EMDB ID: {args.emdb_id}")
@@ -47,7 +59,12 @@ def main():
     ExperimentManager.seed_experiment(config.general.seed)
 
     # Running the experiment
-    pipeline = ExperimentManager(config, args.device)
+    pipeline = ExperimentManager(
+        config,
+        args.device,
+        run_receipts=args.run_receipts or args.deterministic_mode,
+        deterministic_mode=args.deterministic_mode,
+    )
     pipeline.run()
 
     # Metrics (only one sample)
