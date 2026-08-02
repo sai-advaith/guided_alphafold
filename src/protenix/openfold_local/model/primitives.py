@@ -19,16 +19,29 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-deepspeed_is_installed = importlib.util.find_spec("deepspeed") is not None
-ds4s_is_installed = (
-    deepspeed_is_installed
-    and importlib.util.find_spec("deepspeed.ops.deepspeed4science") is not None
-)
-if deepspeed_is_installed:
-    import deepspeed
+# Probing a submodule imports the parent package, so a deepspeed that is present but
+# broken (e.g. deepspeed<=0.5.9 does `from torch._six import inf`, removed in torch 2.0)
+# would turn this capability check into a hard crash at import time. Degrade instead:
+# deepspeed is optional here and unused when use_deepspeed_evo_attention is False.
+try:
+    deepspeed_is_installed = importlib.util.find_spec("deepspeed") is not None
+    ds4s_is_installed = (
+        deepspeed_is_installed
+        and importlib.util.find_spec("deepspeed.ops.deepspeed4science") is not None
+    )
+    if deepspeed_is_installed:
+        import deepspeed
 
-if ds4s_is_installed:
-    from deepspeed.ops.deepspeed4science import DS4Sci_EvoformerAttention
+    if ds4s_is_installed:
+        from deepspeed.ops.deepspeed4science import DS4Sci_EvoformerAttention
+except Exception as _deepspeed_import_error:
+    print(
+        f"WARNING: deepspeed is present but unusable "
+        f"({type(_deepspeed_import_error).__name__}: {_deepspeed_import_error}); "
+        f"continuing without it."
+    )
+    deepspeed_is_installed = False
+    ds4s_is_installed = False
 
 fa_is_installed = importlib.util.find_spec("flash_attn") is not None
 if fa_is_installed:

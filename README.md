@@ -37,6 +37,10 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    ```bash
    pip3 install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
    ```
+   > The pipeline has also been verified end-to-end on `torch==2.6.0+cu124`
+   > (NVIDIA H100, Python 3.11). If you use a newer torch, note that a `deepspeed`
+   > &le; 0.5.9 left over in the environment will emit a warning about `torch._six`;
+   > see [Troubleshooting](#troubleshooting).
    Install AlphaFold-related JAX / TF packages (CPU-only here):
    ```bash
    pip3 install absl-py==1.0.0 dm-haiku==0.0.12 docker==5.0.0 jax==0.4.26 jaxlib==0.4.26 tensorflow-cpu==2.16.1 "pytest<8.5.0" "setuptools<72.0.0"
@@ -47,12 +51,21 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    python3
    >>> import pykeops; pykeops.test_torch_bindings() # test keops install
    ```
-   Install PDBFixer (https://htmlpreview.github.io/?https://github.com/openmm/pdbfixer/blob/master/Manual.html)
+   Install OpenMM and PDBFixer. Both are **required**: the NMR and X-ray
+   preprocessing import them directly (`preprocess_nmr_inputs.py`, `fix_pdb.py`), and
+   AlphaFold2's AMBER relaxation needs them too.
+
+   Use `--no-deps`. OpenMM's dependency metadata requests numpy 2.x, which overwrites
+   the numpy 1.26.4 pinned above and breaks pandas, tensorflow-cpu, and numba.
+   OpenMM 8.2 works correctly against numpy 1.26.4.
    ```bash
-   git clone https://github.com/openmm/pdbfixer.git
-   cd pdbfixer
-   python setup.py install 
+   pip3 install --no-deps openmm==8.2.0 pdbfixer==1.12.0
    ```
+   These are the versions AlphaFold2's own `requirements.txt` pins. Verify:
+   ```bash
+   python3 -c "import openmm, pdbfixer; print('openmm', openmm.__version__, 'OK')"
+   ```
+   PDBFixer manual: https://htmlpreview.github.io/?https://github.com/openmm/pdbfixer/blob/master/Manual.html
 
 3. **Download Protenix model weights and data:**
    
@@ -101,15 +114,73 @@ The pipeline processes experimental data, runs experiment-guided structure predi
    
    Download from: http://www.ccp4.ac.uk/
 
-6. **AMBER99 relaxation using AlphaFold2 (X-ray and NMR):**
-   
-   Recommended for final structure relaxation.
+6. **AMBER99 relaxation using AlphaFold2 (required):**
+
+   This is **required, not optional**. `experiment_manager.py` imports
+   `src.utils.relaxation` at module load, which does `from alphafold.relax import relax`,
+   so *every* entrypoint — cryo-EM, X-ray, and NMR — fails at import without it.
+
+   Two upstream details make the obvious install commands fail:
+
+   - AlphaFold2 no longer ships a `setup.py`, so `python3 setup.py install` errors out.
+   - Its `pyproject.toml` declares `py-modules = ["run_alphafold"]` and never declares
+     `packages`, so `pip install .` produces a ~24 KB wheel containing only the
+     `run_alphafold` CLI. It installs "successfully" and `import alphafold` still fails.
+
+   Put the repository on the environment's import path instead:
+
    ```bash
-   git clone https://github.com/google-deepmind/alphafold
-   cd alphafold/
-   python3 setup.py install
+   # Clone into the conda env, so it is removed together with the env.
+   # Pinned to the revision this pipeline was verified against: AlphaFold2 changed its
+   # packaging once already (it dropped setup.py), so do not track a floating main.
+   git clone https://github.com/google-deepmind/alphafold.git "$CONDA_PREFIX/opt/alphafold"
+   git -C "$CONDA_PREFIX/opt/alphafold" checkout c77e5d2a8961d1a353632c462914ff0a32a950f6
+
+   # Make `import alphafold` work env-wide, from any working directory
+   SITE=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+   echo "$CONDA_PREFIX/opt/alphafold" > "$SITE/alphafold.pth"
    ```
-   Follow instructions in AlphaFold2 repository (https://github.com/google-deepmind/alphafold) to install `
+
+   AlphaFold2 also does not ship `stereo_chemical_props.txt`, and AMBER relaxation
+   fails without it (`FileNotFoundError` raised from
+   `residue_constants.load_stereo_chemical_props`, reached via `amber_minimize`).
+   Fetch the exact revision AlphaFold2's own Dockerfile pins:
+
+   ```bash
+   wget -q -O "$CONDA_PREFIX/opt/alphafold/alphafold/common/stereo_chemical_props.txt" \
+     https://git.scicore.unibas.ch/schwede/openstructure/-/raw/7102c63615b64735c4941278d92b554ec94415f8/modules/mol/alg/src/stereo_chemical_props.txt
+   ```
+
+   If that host is unreachable, this repository vendors a byte-identical copy:
+
+   ```bash
+   cp src/utils/openfold_violations/stereo_chemical_props.txt \
+      "$CONDA_PREFIX/opt/alphafold/alphafold/common/"
+   ```
+
+   Verify the whole relaxation path:
+   ```bash
+   python3 -c "from alphafold.relax import relax; from alphafold.common import protein, residue_constants; print('alphafold OK')"
+   ```
+
+   AlphaFold2's remaining dependencies (`absl-py`, `dm-haiku`, `jax`, `ml-collections`,
+   `tensorflow-cpu`, `docker`) are already satisfied by the steps above. A few are
+   intentionally newer than AlphaFold2's `requirements.txt` asks for — `numpy` 1.26.4
+   vs 1.24.3, `biopython` 1.83 vs 1.79, `ml-collections` 0.1.1 vs 0.1.0 — and the
+   relaxation path works with these. Do **not** run
+   `pip install -r requirements.txt` from the AlphaFold2 clone: it would downgrade
+   numpy and biopython and break the rest of this environment.
+
+### Troubleshooting
+
+**`ModuleNotFoundError: No module named 'torch._six'`** — an old `deepspeed`
+(&le; 0.5.9) is installed and is incompatible with torch &ge; 2.0. This project never
+uses deepspeed (`use_deepspeed_evo_attention=False` is hardcoded); the vendored
+openfold code now degrades with a warning instead of crashing. To silence it:
+```bash
+pip3 uninstall -y deepspeed
+```
+
 ## Usage
 
 ### 1. Cryo-EM Guided Structure Prediction

@@ -15,9 +15,20 @@ import importlib
 from typing import Any, List, Callable, Optional
 from functools import partial
 
-deepspeed_is_installed = importlib.util.find_spec("deepspeed") is not None
-if deepspeed_is_installed:
-    import deepspeed
+# find_spec only locates the package; importing it can still fail (e.g. deepspeed<=0.5.9
+# does `from torch._six import inf`, removed in torch 2.0). deepspeed is optional here,
+# so degrade to the native torch checkpoint rather than crashing at import time.
+try:
+    deepspeed_is_installed = importlib.util.find_spec("deepspeed") is not None
+    if deepspeed_is_installed:
+        import deepspeed
+except Exception as _deepspeed_import_error:
+    print(
+        f"WARNING: deepspeed is present but unusable "
+        f"({type(_deepspeed_import_error).__name__}: {_deepspeed_import_error}); "
+        f"falling back to torch.utils.checkpoint."
+    )
+    deepspeed_is_installed = False
 
 import torch
 import torch.utils.checkpoint

@@ -382,7 +382,7 @@ def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_
     config["general"]["output_folder"] = f"{output_directory}"
 
     # Protein parameters
-    config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"]}]
+    config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"], "sequence_type": "proteinChain"}]
     config["protein"]["chains_to_use"] = [0]
     config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = pdb_id
