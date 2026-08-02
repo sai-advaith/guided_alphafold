@@ -377,8 +377,14 @@ class ExperimentManager:
                     loss_value.backward()
                     steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
                 
+                    # Get guidance and add to structures (noisy variable)
                     with torch.no_grad():
-                        guidance_direction = structures.grad if i > start_guidance_from else None
+                        guidance_direction = structures.grad
+                        if normalize_gradients and not (guidance_direction.abs() < 1e-6).all():
+                            normalization_norm = guidance_direction.flatten(1,-1).norm(dim=-1)
+                            normalization_norm[normalization_norm < 1e-4] = 1
+                            guidance_direction = guidance_direction / normalization_norm[:,None, None]
+                        guidance_direction = guidance_direction * structures_gradient_norm
                         structures.grad = None
 
             structures = self.model_manager.get_x_t_from_x_0_hat(
@@ -389,7 +395,6 @@ class ExperimentManager:
             if self.loss_function is not None:
                 self.loss_function.post_optimization_step()
             if i < self.config.model_manager.diffusion_N - 1:
-                # structures = self.model_manager.get_x_noisy(structures, i + 1)
                 structures = self.model_manager.get_x_noisy(structures, start_index=start_idx, end_index=end_idx)
             structures = structures.detach().clone()
             if self.receipt_ledger is not None and (

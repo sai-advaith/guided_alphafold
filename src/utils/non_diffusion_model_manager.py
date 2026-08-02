@@ -454,12 +454,10 @@ class ProtenixModelManager:
             c_tau = self.noise_schedule[end_index]
             t_hat = self.get_t_hat(start_index)
             delta = (x_noisy - x_0_hat) / t_hat[..., None, None]
-
             if guidance_direction is not None:
                 if normalize_gradients:
-                    guidance_direction = guidance_direction * delta.norm(dim=(1,2), keepdim=True) / guidance_direction.norm(dim=(1, 2), keepdim=True) * structures_gradient_norm
+                    guidance_direction = guidance_direction * delta.flatten(1,-1).norm(dim=-1)[:, None, None]
                 delta = delta + step_size * guidance_direction
-
             dt = c_tau - t_hat
             x_l = x_noisy + self.step_scale_eta * dt[..., None, None] * delta
             return x_l
