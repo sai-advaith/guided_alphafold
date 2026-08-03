@@ -393,6 +393,43 @@ def load_pdb_atom_locations(pdb_file, device="cpu", single_model=True):
     atom_positions_tensor = torch.tensor(atom_positions_array, dtype=torch.float32, device=device)
     return atom_positions_tensor  # shape: (1, N, 3) or (M, N, 3)
 
+def chain_segments_from_atom_array(atom_array):
+    """
+    True per-chain [start, stop) atom boundaries, plus normalized chain labels.
+
+    Boundaries come from contiguous runs of atom_array.chain_id rather than from
+    dividing the atom count evenly, so chains of differing length (hetero-complexes)
+    are segmented correctly. An even split only happens to be right for homo-oligomers.
+
+    Labels are normalized to their first character because the two sources disagree:
+    the Protenix dataloader emits "A0"/"B1" while structures written by
+    save_structure_full() (and hence read back by the metrics) use "A"/"B". Restraint
+    files are expected to use the single-character form.
+
+    Returns (labels: np.ndarray[str], segments: List[Tuple[int, int]]).
+    """
+    chain_id = np.asarray(atom_array.chain_id)
+    n_total = len(chain_id)
+    if n_total == 0:
+        return np.array([], dtype=object), []
+
+    def normalize(value):
+        if isinstance(value, (list, tuple, np.ndarray)):
+            value = value[0]
+        text = str(value)
+        return text[0] if text else text
+
+    labels, segments = [], []
+    start = 0
+    for index in range(1, n_total + 1):
+        if index == n_total or chain_id[index] != chain_id[start]:
+            labels.append(normalize(chain_id[start]))
+            segments.append((start, index))
+            start = index
+
+    return np.array(labels, dtype=object), segments
+
+
 def write_multi_model_pdb(pdb_files, out_path):
     """
     Combine single-model PDBs into one multi-model PDB (one MODEL record each).

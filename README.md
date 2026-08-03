@@ -324,10 +324,12 @@ python3 run_nmr.py \
 
 **Required Parameters:**
 - `--conformation_id`: Identifier for this run, used for output naming in place of a PDB ID
-- `--sequence`: One-letter amino acid sequence of the construct
+- `--sequences`: One-letter sequence per unique chain, space-separated (`--sequence` is a single-chain shorthand)
 - `--restraints`: Path to a restraint file — either a `.csv` in the [format below](#restraint-file-format), or a `.str`/`.mr` NMR-STAR file which is converted automatically
 
 **Optional Parameters:** all of the Mode 1 options, plus
+- `--counts`: Number of copies of each entry in `--sequences`. Defaults to `1` each.
+- `--sequence_types`: Molecule type per entry in `--sequences` — `proteinChain`, `rnaSequence` or `dnaSequence`. Defaults to all `proteinChain`.
 - `--reference_pdb`: Reference structure to compare against. When supplied, the metrics table gains an `MD` row alongside the guided row; when omitted, metrics are guided-only.
 
 > **The reference structure must retain its hydrogens.** Metrics are computed over the
@@ -349,8 +351,45 @@ python3 run_nmr.py \
     --device cuda:0
 ```
 
-The `--conformation_id` mode currently supports a single protein chain. Multi-chain,
-DNA and RNA constructs are supported only through the deposited-entry mode.
+##### Multiple chains
+
+`--sequences`, `--counts` and `--sequence_types` are parallel lists, following the same
+convention as `run_em.py`. A homotrimer is one sequence with a count of three:
+
+```bash
+python3 run_nmr.py --conformation_id trimer \
+    --sequences GYIPEAPRDGQAYVRKDGEWVLLSTFL \
+    --counts 3 \
+    --restraints my_restraints.csv
+```
+
+A hetero-complex lists each unique chain, and molecule types can be mixed:
+
+```bash
+python3 run_nmr.py --conformation_id complex_AB \
+    --sequences GYIPEAPRDGQAYVRKDGEWVLLSTFL MKTAYIAKQRQISFVK \
+    --counts 2 1 \
+    --sequence_types proteinChain proteinChain \
+    --restraints my_restraints.csv
+```
+
+Chains are created in the order given — sequence 1's copies first, then sequence 2's —
+and labelled `A`, `B`, `C`, … in that order. **The `chain1`/`chain2` values in your
+restraint file must use those labels**, not the chain names from whatever structure the
+restraints originally came from. Inter-chain restraints naming a chain that does not
+exist are excluded from guidance with a warning; watch for
+`inter-chain restraint(s) reference chains`.
+
+Restraints without `chain1`/`chain2` columns are treated as within-chain and applied to
+every chain independently, which is usually what you want for a homo-oligomer.
+
+Order-parameter losses (`--methyl_relax_file` and friends) are built from the first
+chain's topology and applied to all chains, so they are rejected for constructs whose
+chains differ in length. They are fine for homo-oligomers.
+
+Mode 1 (PDB ID) builds a single-chain model. If the deposited entry has more than one
+polymer chain it now fails with the equivalent multi-chain command rather than silently
+keeping only the first chain.
 
 #### Restraint file format
 

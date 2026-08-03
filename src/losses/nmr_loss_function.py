@@ -12,7 +12,7 @@ from biotite.structure.io import load_structure
 
 from .s_2_loss_function import S2LossFunction
 from ..protenix.metrics.rmsd import self_aligned_rmsd
-from ..utils.io import load_pdb_atom_locations
+from ..utils.io import load_pdb_atom_locations, chain_segments_from_atom_array
 from ..utils.hydrogen_addition import (
     FragmentLibrary,
     AtomNameLibrary,
@@ -138,11 +138,10 @@ class NMRLossFunction(AbstractLossFunction):
         # restraint tuples used by gather
         self.hydrogen_guidance_params = self._build_guidance_params()
 
-        # chain segmentation (assumes equal-length segments in atom_array per chain)
-        self.chain_ids = np.unique(atom_array.chain_id)
-        self.chain_ids = np.array([c[0] for c in self.chain_ids])
+        # chain segmentation from real chain boundaries, so chains of differing length
+        # (hetero-complexes) are handled; an even split is only correct for homo-oligomers
+        self.chain_ids, self.chain_indices = chain_segments_from_atom_array(atom_array)
         self.n_chains = self.chain_ids.size
-        self.chain_indices = self._compute_chain_segments(atom_array)
         self.num_constraints = len(self.within_chain_unique_or)*self.n_chains+ len(self.multi_chain_unique_or)
 
 
@@ -151,6 +150,17 @@ class NMRLossFunction(AbstractLossFunction):
 
         # order parameter losses (constructed with the first chain's topology)
         chain_atom_array0 = atom_array[self.chain_indices[0][0] : self.chain_indices[0][1]]
+        if any((methyl_relax_file, methyl_rdc_file, amide_rdc_file, amide_relax_file)):
+            chain_lengths = {stop - start for start, stop in self.chain_indices}
+            if len(chain_lengths) > 1:
+                raise ValueError(
+                    f"Order-parameter losses are built from the first chain's topology and "
+                    f"applied to every chain, which is only valid when all chains are "
+                    f"identical. This model has chains of differing length "
+                    f"({sorted(chain_lengths)} atoms). Remove the order-parameter files "
+                    f"(--methyl_relax_file/--methyl_rdc_file/--amide_rdc_file/"
+                    f"--amide_relax_file) or use a homo-oligomeric construct."
+                )
         self.methyl_relax_scale = methyl_relax_scale
         self.methyl_rdc_scale = methyl_rdc_scale
         self.amide_rdc_scale = amide_rdc_scale
@@ -159,6 +169,9 @@ class NMRLossFunction(AbstractLossFunction):
         self.methyl_rdc_loss = S2LossFunction(chain_atom_array0, methyl_rdc_file, device, type="methyl_rdc") if methyl_rdc_file else None
         self.amide_rdc_loss = S2LossFunction(chain_atom_array0, amide_rdc_file, device, type="amide_rdc") if amide_rdc_file else None
         self.amide_relax_loss = S2LossFunction(chain_atom_array0, amide_relax_file, device, type="amide_relax") if amide_relax_file else None
+
+        # Chain labels in the restraint file that match no model chain; warned about once.
+        self._warned_unmatched_pairs = set()
 
         # logging state
         self._reset_logs()
@@ -192,14 +205,6 @@ class NMRLossFunction(AbstractLossFunction):
                 )
             )
         return out
-
-    def _compute_chain_segments(self, atom_array) -> List[Tuple[int, int]]:
-        """Compute [start, end) slices per chain (assumes equal-length chains)."""
-        n_total = len(atom_array)
-        n_per_chain = n_total // self.n_chains
-        starts = np.arange(0, n_total, n_per_chain)
-        stops = starts + n_per_chain
-        return list(zip(starts, stops))
 
     def _build_pair_index_map(self) -> Dict[Tuple[str, str], List[int]]:
         """Map explicit (chain1, chain2) to row indices for cross-chain constraints."""
@@ -417,6 +422,18 @@ class NMRLossFunction(AbstractLossFunction):
             label_to_index = {lbl: i for i, lbl in enumerate(self.chain_ids)}
             for (c1, c2), idxs in self.pair_to_indices.items():
                 if c1 not in label_to_index or c2 not in label_to_index:
+                    # Silently skipping these would leave them in num_constraints while
+                    # never contributing violations, making the satisfaction metrics look
+                    # better than reality. Warn once per unmatched pair.
+                    if (c1, c2) not in self._warned_unmatched_pairs:
+                        self._warned_unmatched_pairs.add((c1, c2))
+                        print(
+                            f"WARNING: {len(idxs)} inter-chain restraint(s) reference chains "
+                            f"'{c1}'/'{c2}', which are not among the model's chains "
+                            f"{sorted(label_to_index)}. They are excluded from guidance. "
+                            f"Chain labels in the restraint file must match the model's chain "
+                            f"order (A, B, C, ... following --sequences/--counts)."
+                        )
                     continue
                 i, j = label_to_index[c1], label_to_index[c2]
                 res = self._evaluate_index_block(idxs, chain_cache[i], chain_cache[j], within_chain=False)

@@ -8,6 +8,7 @@ from src.utils.process_pipeline_inputs.preprocess_nmr_inputs import main as prep
 from src.utils.process_pipeline_inputs.preprocess_nmr_inputs import (
     main_from_custom_inputs as preprocess_custom_nmr_inputs,
 )
+from src.utils.process_pipeline_inputs.preprocess_nmr_inputs import normalize_chain_specification
 from src.metrics.nmr_metrics import run_nmr_metrics
 
 RELAXED_SUFFIX = "_colab_relaxed.pdb"
@@ -63,10 +64,29 @@ def main():
         help="Identifier for a custom run, used for output naming instead of a PDB ID. Requires --sequence and --restraints.",
     )
     parser.add_argument(
+        '--sequences',
+        nargs='+',
+        default=None,
+        help="One-letter sequence per unique chain (custom mode). Use --counts for copies of each.",
+    )
+    parser.add_argument(
+        '--counts',
+        nargs='+',
+        type=int,
+        default=None,
+        help="Number of copies of each entry in --sequences. Defaults to 1 each.",
+    )
+    parser.add_argument(
+        '--sequence_types',
+        nargs='+',
+        default=None,
+        help="Molecule type per entry in --sequences: proteinChain, rnaSequence or dnaSequence. Defaults to all proteinChain.",
+    )
+    parser.add_argument(
         '--sequence',
         type=str,
         default=None,
-        help="One-letter amino acid sequence of the construct (custom mode).",
+        help="Single-chain shorthand for --sequences (custom mode).",
     )
     parser.add_argument(
         '--restraints',
@@ -103,12 +123,22 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.sequence is not None and args.sequences is not None:
+        parser.error("Use either --sequence (single chain) or --sequences (one or more), not both.")
+    sequences = args.sequences if args.sequences is not None else (
+        [args.sequence] if args.sequence is not None else None
+    )
+
     custom_flags = {
         '--conformation_id': args.conformation_id,
-        '--sequence': args.sequence,
+        '--sequences/--sequence': sequences,
         '--restraints': args.restraints,
     }
     supplied = {flag: value for flag, value in custom_flags.items() if value is not None}
+
+    for flag, value in (('--counts', args.counts), ('--sequence_types', args.sequence_types)):
+        if value is not None and sequences is None:
+            parser.error(f"{flag} requires --sequences (or --sequence).")
 
     if args.pdb_id is not None and supplied:
         parser.error(
@@ -118,19 +148,33 @@ def main():
     if args.pdb_id is None and not supplied:
         parser.error(
             "Nothing to run. Supply either a pdb_id positional argument, or all of "
-            "--conformation_id, --sequence and --restraints."
+            "--conformation_id, --sequences and --restraints."
         )
     if args.pdb_id is None:
         missing = sorted(set(custom_flags) - set(supplied))
         if missing:
             parser.error(
-                f"Custom mode needs all of --conformation_id, --sequence and --restraints; "
+                f"Custom mode needs all of --conformation_id, --sequences and --restraints; "
                 f"missing: {', '.join(missing)}."
             )
     if args.pdb_id is not None and args.reference_pdb is not None:
         parser.error(
             "--reference_pdb only applies to custom mode; in PDB ID mode the deposited "
             "structure is fetched automatically."
+        )
+
+    # Validate the chain specification before any file or network access, so a bad flag
+    # combination fails immediately rather than behind a download or a missing-file error.
+    if sequences is not None:
+        try:
+            chain_entries, total_chains = normalize_chain_specification(
+                sequences, counts=args.counts, sequence_types=args.sequence_types
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print(
+            f"Chain specification: {len(chain_entries)} unique sequence(s), "
+            f"{total_chains} chain(s) total."
         )
 
     # Prepare config file
@@ -142,9 +186,10 @@ def main():
         )
     else:
         config_file_path = preprocess_custom_nmr_inputs(
-            args.conformation_id, args.sequence, args.restraints, args.input_directory,
+            args.conformation_id, sequences, args.restraints, args.input_directory,
             args.output_directory, args.wandb_key, args.wandb_project,
             reference_pdb=args.reference_pdb,
+            counts=args.counts, sequence_types=args.sequence_types,
             methyl_rdc_file=args.methyl_rdc_file, amide_rdc_file=args.amide_rdc_file,
             amide_relax_file=args.amide_relax_file, methyl_relax_file=args.methyl_relax_file,
         )

@@ -351,6 +351,17 @@ def extract_distance_restraints(star_file_path: str, verbose: bool = False) -> p
     df = pd.DataFrame(distance_restraints)
     return df
 
+def get_polymer_chain_sequences(pdb_file_path: str) -> list:
+    """One-letter sequence per polymer chain in the first model."""
+    sequences = []
+    for chain in gemmi.read_pdb(pdb_file_path)[0]:
+        sequence = "".join(aa_map[res.name] for res in chain if res.name in aa_map)
+        # Skip ligand/solvent-only chains, which map to sentinel characters in aa_map.
+        if sequence and not set(sequence) <= set("%&^"):
+            sequences.append(sequence)
+    return sequences
+
+
 def get_amino_acid_sequence(pdb_file_path: str) -> str:
     return "".join([aa_map[res.name] for res in gemmi.read_pdb(pdb_file_path)[0][0]])
 
@@ -534,6 +545,55 @@ def prepare_custom_restraints(restraints_path, conformation_id, input_directory)
     return csv_path
 
 
+SUPPORTED_SEQUENCE_TYPES = ("proteinChain", "rnaSequence", "dnaSequence")
+
+
+def normalize_chain_specification(sequences, counts=None, sequence_types=None):
+    """
+    Validate and normalize a multi-chain specification into config 'sequences' entries.
+
+    Mirrors run_em.py: parallel lists of sequences, per-sequence copy counts, and
+    molecule types. Defaults are one copy of each sequence, all protein chains.
+    Returns (sequences_list, total_chains).
+    """
+    if isinstance(sequences, str):
+        sequences = [sequences]
+    sequences = list(sequences)
+    if not sequences:
+        raise ValueError("At least one sequence must be supplied.")
+
+    counts = [1] * len(sequences) if counts is None else [int(c) for c in counts]
+    sequence_types = (
+        ["proteinChain"] * len(sequences) if sequence_types is None else list(sequence_types)
+    )
+
+    if len(counts) != len(sequences):
+        raise ValueError(
+            f"--counts has {len(counts)} entries but --sequences has {len(sequences)}; "
+            f"they must be parallel lists."
+        )
+    if len(sequence_types) != len(sequences):
+        raise ValueError(
+            f"--sequence_types has {len(sequence_types)} entries but --sequences has "
+            f"{len(sequences)}; they must be parallel lists."
+        )
+    bad_types = [t for t in sequence_types if t not in SUPPORTED_SEQUENCE_TYPES]
+    if bad_types:
+        raise ValueError(
+            f"Unsupported sequence type(s): {', '.join(bad_types)}. "
+            f"Must be one of {', '.join(SUPPORTED_SEQUENCE_TYPES)}."
+        )
+    bad_counts = [c for c in counts if c < 1]
+    if bad_counts:
+        raise ValueError(f"--counts entries must be >= 1; got {bad_counts}.")
+
+    sequences_list = [
+        {"count": count, "sequence": sequence, "sequence_type": sequence_type}
+        for sequence, count, sequence_type in zip(sequences, counts, sequence_types)
+    ]
+    return sequences_list, sum(counts)
+
+
 def create_nmr_configuration_file_from_custom_inputs(
     conformation_id,
     sequence,
@@ -542,6 +602,8 @@ def create_nmr_configuration_file_from_custom_inputs(
     wandb_key,
     wandb_project,
     reference_pdb=None,
+    counts=None,
+    sequence_types=None,
     methyl_rdc_file=None,
     amide_rdc_file=None,
     amide_relax_file=None,
@@ -563,11 +625,14 @@ def create_nmr_configuration_file_from_custom_inputs(
     config["general"]["name"] = f"{conformation_id}_nmr_guided"
     config["general"]["output_folder"] = f"{output_directory}"
 
-    # Protein parameters
-    config["protein"]["sequences"] = [
-        {"count": 1, "sequence": sequence, "sequence_type": "proteinChain"}
-    ]
-    config["protein"]["chains_to_use"] = [0]
+    # Chain parameters. `sequence` may be a single string (one chain) or a list of
+    # sequences, optionally with per-sequence counts and molecule types.
+    sequences_list, total_chains = normalize_chain_specification(
+        sequence, counts=counts, sequence_types=sequence_types
+    )
+    config["protein"]["sequences"] = sequences_list
+    config["protein"]["chains_to_use"] = list(range(total_chains))
+    config["protein"]["should_align_to_chains"] = list(range(total_chains))
     config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = conformation_id
     config["protein"]["reference_raw_pdb_chain"] = "A"
@@ -626,6 +691,8 @@ def main_from_custom_inputs(
     wandb_key,
     wandb_project,
     reference_pdb=None,
+    counts=None,
+    sequence_types=None,
     methyl_rdc_file=None,
     amide_rdc_file=None,
     amide_relax_file=None,
@@ -662,6 +729,8 @@ def main_from_custom_inputs(
         wandb_key,
         wandb_project,
         reference_pdb=reference_pdb,
+        counts=counts,
+        sequence_types=sequence_types,
         methyl_rdc_file=order_param_paths["methyl_rdc"],
         amide_rdc_file=order_param_paths["amide_rdc"],
         amide_relax_file=order_param_paths["amide_relax"],
@@ -677,6 +746,21 @@ def main(pdb_id, input_directory, output_directory, wandb_key, wandb_project, me
     pdb_file_path = download_pdb_file(pdb_id, input_directory)
     fixed_pdb_file_path = fix_pdb(pdb_file_path, pdb_id)
     amino_acid_sequence = get_amino_acid_sequence(fixed_pdb_file_path)
+
+    # This path models the first chain only. Rather than silently discard the rest of a
+    # complex, direct the user to the explicit multi-chain flags.
+    chain_sequences = get_polymer_chain_sequences(fixed_pdb_file_path)
+    if len(chain_sequences) > 1:
+        raise ValueError(
+            f"{pdb_id.upper()} has {len(chain_sequences)} polymer chains, but PDB-ID mode "
+            f"builds a single-chain model and would silently keep only the first.\n"
+            f"Re-run with the explicit multi-chain flags, for example:\n"
+            f"  python3 run_nmr.py --conformation_id {pdb_id} \\\n"
+            f"      --sequences {' '.join(chain_sequences)} \\\n"
+            f"      --counts {' '.join(['1'] * len(chain_sequences))} \\\n"
+            f"      --restraints {os.path.join(input_directory, 'restraints', pdb_id, pdb_id + '.csv')}\n"
+            f"(Identical chains can be collapsed into one --sequences entry with a higher --counts value.)"
+        )
 
     # Save metadata
     save_metadata(pdb_id, amino_acid_sequence, input_directory)

@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .io import chain_segments_from_atom_array
+
 
 # ============================== Group helpers ============================== #
 def methyl_group_names(nmr_name: str, residue_name: str) -> List[str]:
@@ -52,13 +54,14 @@ def q_group_names(nmr_name: str, residue_name: str) -> List[str]:
 
 # ============================== I/O utilities ============================= #
 def _equal_segments(atom_array) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
-    """Infer chain IDs and equal-length [start, stop) segments (assumes equal partitions)."""
-    chain_ids = np.unique(atom_array.chain_id)
-    chain_ids = np.array([c[0] if isinstance(c, (list, tuple, np.ndarray)) else c for c in chain_ids])
-    n_total = len(atom_array)
-    n_per_chain = n_total // len(chain_ids)
-    cuts = [(i * n_per_chain, (i + 1) * n_per_chain) for i in range(len(chain_ids))]
-    return chain_ids, cuts
+    """
+    Infer chain IDs and per-chain [start, stop) segments.
+
+    Delegates to the shared helper, which derives boundaries from contiguous chain_id
+    runs so hetero-complexes are segmented correctly. The name is kept for callers; the
+    "equal partitions" assumption it used to make is gone.
+    """
+    return chain_segments_from_atom_array(atom_array)
 
 
 def _prefilter_restraints(
