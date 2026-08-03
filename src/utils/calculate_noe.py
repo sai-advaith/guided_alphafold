@@ -168,8 +168,26 @@ class CalculateNOE:
         self.inter_data = self.nmr_data[self.single_chain_mask_np]
         self.intra_data = self.nmr_data[self.multi_chain_mask_np]
 
-        # Total constraints follows project logic: within_or * n_chains + multi_or
-        self.total_constraints = int(len(self.within_unique_or) * len(self.chain_indices) + len(self.multi_unique_or))
+        # Which within-chain rows belong to which chain (see _build_passes). None means
+        # "no chain columns", i.e. apply every within-chain row to every chain.
+        self.within_indices_by_label = None
+        if self.chain1_col is not None:
+            by_label = defaultdict(list)
+            for k in np.nonzero(self.single_chain_mask_np)[0]:
+                by_label[str(self.chain1_col[k])].append(int(k))
+            self.within_indices_by_label = dict(by_label)
+
+        # Denominator must match what is actually evaluated: with chain columns, the
+        # per-chain OR-group counts summed over chains; without them, within_or * n_chains.
+        if self.within_indices_by_label is None:
+            within_total = len(self.within_unique_or) * len(self.chain_indices)
+        else:
+            or_ids_np = np.asarray(self.nmr_data["constrain_id"])
+            within_total = sum(
+                len(set(or_ids_np[self.within_indices_by_label.get(str(label), [])]))
+                for label in self.chain_ids
+            )
+        self.total_constraints = int(within_total + len(self.multi_unique_or))
 
         # Pair index map (only if multi present)
         self.pair_to_indices: Dict[Tuple[str, str], List[int]] = defaultdict(list)
@@ -288,9 +306,16 @@ class CalculateNOE:
         kinds: List[str] = []
         pass_chain_meta: List[Tuple[str, str]] = []
 
-        # WITHIN: rows where chain1==chain2 (or all rows if no chain columns)
-        sc_indices = np.nonzero(self.single_chain_mask_np)[0].tolist()
+        # WITHIN: with chain columns, each chain is evaluated only against the restraints
+        # naming it. Without them, every chain gets every within-chain row, which is right
+        # for a monomer or homo-oligomer but would otherwise score one chain's restraints
+        # against another chain's coordinates in a hetero-complex.
+        sc_indices_all = np.nonzero(self.single_chain_mask_np)[0].tolist()
         for ci, lbl in enumerate(self.chain_ids):
+            if self.within_indices_by_label is None:
+                sc_indices = sc_indices_all
+            else:
+                sc_indices = self.within_indices_by_label.get(str(lbl), [])
             D, m = self._gather_pass(structures, sc_indices, ci, ci)
             per_pass.append((D, m))
             kinds.append("within")

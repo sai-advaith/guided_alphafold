@@ -142,7 +142,40 @@ class NMRLossFunction(AbstractLossFunction):
         # (hetero-complexes) are handled; an even split is only correct for homo-oligomers
         self.chain_ids, self.chain_indices = chain_segments_from_atom_array(atom_array)
         self.n_chains = self.chain_ids.size
-        self.num_constraints = len(self.within_chain_unique_or)*self.n_chains+ len(self.multi_chain_unique_or)
+
+        # Which within-chain rows belong to which chain. With explicit chain columns a row
+        # is applied only to the chain it names; without them every row is applied to every
+        # chain. The latter is correct for a monomer or a homo-oligomer (identical copies),
+        # but for a hetero-complex it would evaluate one chain's restraints against
+        # another's coordinates -- and where residue numbers coincide that silently
+        # enforces a meaningless restraint rather than dropping it.
+        self.within_indices_by_label = None
+        if self.chain1_col is not None:
+            by_label = defaultdict(list)
+            for k in np.nonzero(self.single_chain_mask_np)[0]:
+                by_label[str(self.chain1_col[k])].append(int(k))
+            self.within_indices_by_label = dict(by_label)
+
+        if self.within_indices_by_label is None:
+            within_total = len(self.within_chain_unique_or) * self.n_chains
+        else:
+            or_ids_np = np.asarray(self.nmr_data["constrain_id"])
+            within_total = sum(
+                len(set(or_ids_np[self.within_indices_by_label.get(str(label), [])]))
+                for label in self.chain_ids
+            )
+        self.num_constraints = within_total + len(self.multi_chain_unique_or)
+
+        if self.chain1_col is None and self.n_chains > 1:
+            chain_lengths = {stop - start for start, stop in self.chain_indices}
+            if len(chain_lengths) > 1:
+                print(
+                    f"WARNING: this model has chains of differing length "
+                    f"({sorted(chain_lengths)} atoms) but the restraint file has no "
+                    f"'chain1'/'chain2' columns, so every within-chain restraint is applied "
+                    f"to every chain. For a hetero-complex add chain columns naming the "
+                    f"chain each restraint belongs to (labels {list(self.chain_ids)})."
+                )
 
 
         # mapping of explicit cross-chain pairs -> constraint indices
@@ -172,6 +205,8 @@ class NMRLossFunction(AbstractLossFunction):
 
         # Chain labels in the restraint file that match no model chain; warned about once.
         self._warned_unmatched_pairs = set()
+        # Model chains with no within-chain restraints; warned about once.
+        self._warned_empty_chains = set()
 
         # logging state
         self._reset_logs()
@@ -399,9 +434,23 @@ class NMRLossFunction(AbstractLossFunction):
         noe_within = torch.tensor(0.0, device=self.device)
         noe_multi = torch.tensor(0.0, device=self.device)
 
-        # ---- WITHIN-CHAIN: apply same within-chain constraints to every chain ---- #
-        sc_indices = np.nonzero(self.single_chain_mask_np)[0].tolist()
+        # ---- WITHIN-CHAIN ---- #
+        # With chain columns, each chain gets only the restraints naming it. Without them,
+        # every chain gets every within-chain restraint (monomer / homo-oligomer default).
+        sc_indices_all = np.nonzero(self.single_chain_mask_np)[0].tolist()
         for cidx in range(self.n_chains):
+            label = str(self.chain_ids[cidx])
+            if self.within_indices_by_label is None:
+                sc_indices = sc_indices_all
+            else:
+                sc_indices = self.within_indices_by_label.get(label, [])
+                if not sc_indices and label not in self._warned_empty_chains:
+                    self._warned_empty_chains.add(label)
+                    print(
+                        f"WARNING: no within-chain restraints reference chain '{label}'. "
+                        f"Its geometry is unconstrained by NOE data. Chain labels present in "
+                        f"the restraint file: {sorted(self.within_indices_by_label)}."
+                    )
             ctx = chain_cache[cidx]
             res = self._evaluate_index_block(sc_indices, ctx, ctx, within_chain=True)
             if res is not None:

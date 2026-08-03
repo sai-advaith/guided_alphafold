@@ -745,13 +745,14 @@ def query_msa_server(msa_full_save_dir, sequence_dictionary):
                 # creating a subfolder for each unique sequence
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/non_pairing.a3m'), 'w') as f:
                     f.write(msa_unpaired[protein_idx])
-                    protein_idx += 1
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/pairing.a3m'), 'w') as f:
                     # if there are more than one unique sequence, we can do pairing
                     if len(set(sequences)) > 1:
-                        f.write(msa_paired[i])
-                    else:
-                        continue
+                        # Indexed over protein sequences only, like msa_unpaired above --
+                        # not over sequence_dictionary, which may also hold DNA/RNA entries.
+                        f.write(msa_paired[protein_idx])
+                # Advance only after both writes, so both use this sequence's protein index.
+                protein_idx += 1
 
 def delete_hydrogens(pdb_file):
     # Load the structure

@@ -381,7 +381,17 @@ exist are excluded from guidance with a warning; watch for
 `inter-chain restraint(s) reference chains`.
 
 Restraints without `chain1`/`chain2` columns are treated as within-chain and applied to
-every chain independently, which is usually what you want for a homo-oligomer.
+every chain independently. That is correct for a monomer or a homo-oligomer, where the
+chains are identical copies.
+
+**A hetero-complex needs the chain columns.** Without them every restraint is applied to
+every chain, so one chain's restraints get scored against another chain's coordinates —
+and wherever the residue numbers happen to coincide, a meaningless restraint is enforced
+rather than skipped. Add `chain1`/`chain2` naming the chain each restraint belongs to and
+each chain is then evaluated only against its own restraints. If chains differ in length
+and the columns are missing, the run warns:
+`this model has chains of differing length ... but the restraint file has no
+'chain1'/'chain2' columns`.
 
 Order-parameter losses (`--methyl_relax_file` and friends) are built from the first
 chain's topology and applied to all chains, so they are rejected for constructs whose
