@@ -269,6 +269,13 @@ python3 run_xray.py 2izr A SLTGT \
 
 Fits protein structures to NMR experimental restraints including NOE distances, dihedral angles, RDC, and relaxation data.
 
+There are two input modes:
+
+- **Deposited entry** — give a PDB ID and the restraints, coordinates and sequence are all fetched for you.
+- **Custom restraints** — give your own restraint file, a sequence, and an identifier. No deposited entry is needed. See [Custom restraints](#custom-restraints).
+
+#### Mode 1: deposited PDB entry
+
 **Command:**
 ```bash
 export CUBLAS_WORKSPACE_CONFIG=:16:8
@@ -298,6 +305,115 @@ python3 run_nmr.py 1u0p \
     --output_directory nmr_pipeline_outputs \
     --device cuda:0
 ```
+
+#### Custom restraints
+
+To guide an ensemble from your own data, supply an identifier, the sequence, and a
+restraint file instead of a PDB ID. Nothing is fetched, and no deposited structure is
+required.
+
+**Command:**
+```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
+python3 run_nmr.py \
+    --conformation_id <identifier> \
+    --sequence <one_letter_sequence> \
+    --restraints <path> \
+    [OPTIONS]
+```
+
+**Required Parameters:**
+- `--conformation_id`: Identifier for this run, used for output naming in place of a PDB ID
+- `--sequence`: One-letter amino acid sequence of the construct
+- `--restraints`: Path to a restraint file — either a `.csv` in the [format below](#restraint-file-format), or a `.str`/`.mr` NMR-STAR file which is converted automatically
+
+**Optional Parameters:** all of the Mode 1 options, plus
+- `--reference_pdb`: Reference structure to compare against. When supplied, the metrics table gains an `MD` row alongside the guided row; when omitted, metrics are guided-only.
+
+> **The reference structure must retain its hydrogens.** Metrics are computed over the
+> intersection of the atom sets of every structure being compared, so a
+> hydrogen-stripped reference (a "fixed" or cleaned model) removes protons from the
+> guided structures too. Almost every NOE restraint refers to a proton, so the
+> evaluation silently shrinks to a handful of restraints and typically reports zero
+> violations — which looks like a perfect fit rather than a failed comparison. Use the
+> deposited NMR ensemble, and watch for the `only N/M NOE restraints are resolvable`
+> warning. Mode 1 does this correctly for you.
+
+**Example:**
+```bash
+export CUBLAS_WORKSPACE_CONFIG=:16:8
+python3 run_nmr.py \
+    --conformation_id my_conf_A \
+    --sequence GYIPEAPRDGQAYVRKDGEWVLLSTFL \
+    --restraints /path/to/my_restraints.csv \
+    --device cuda:0
+```
+
+The `--conformation_id` mode currently supports a single protein chain. Multi-chain,
+DNA and RNA constructs are supported only through the deposited-entry mode.
+
+#### Restraint file format
+
+A restraint CSV is what an NMR-STAR `_mr.str` file becomes after conversion, and is what
+both the guidance loss and the metrics read. Columns are looked up by name, so their
+order does not matter. Passing a `.str`/`.mr` file to `--restraints` produces this
+automatically; the schema is documented for hand-built or externally generated files.
+
+**Required columns**
+
+| Column | Type | Notes |
+|---|---|---|
+| `type` | string | Only rows equal to `NOE` are used; other rows are ignored |
+| `constrain_id` | integer | OR-group id. Rows sharing an id are treated as alternatives, and only the least-violated one is penalised |
+| `residue1_num` | integer | 1-based residue index into the supplied sequence |
+| `residue1_id` | string | Three-letter uppercase residue name (`ALA`, `LEU`, …) |
+| `atom1` | string | NMR atom name — see below |
+| `residue2_num` | integer | |
+| `residue2_id` | string | |
+| `atom2` | string | |
+| `lower_bound` | float or `.` | `.` is accepted and treated as `0` |
+| `upper_bound` | float | Must be numeric — unlike `lower_bound`, `.` is **not** accepted here |
+
+**Optional columns** — `chain1` and `chain2`. Supply both or neither. If absent, every
+restraint is treated as within-chain. If present, rows where the two differ become
+inter-chain restraints between the named chains.
+
+**Ignored if present** — `member_id`, `member_logic`, `heavy_atom1`, `heavy_atom2`,
+`distance`. The NMR-STAR converter emits these, but nothing reads them.
+
+**Atom naming.** Hydrogens are built on the fly, so `atom1`/`atom2` use NMR naming
+conventions: individual protons (`HA`, `HB2`, `HD21`), methyl pseudo-atoms (`MB`, `MD1`,
+`MG2`, `ME`), and aromatic or amine pseudo-atoms (`QD`, `QE`, `QZ`). Names ending in `#`
+are averaged over their `1`/`2` partners. Unrecognised names fall back to a heavy-atom
+lookup, and any restraint that still cannot be resolved is skipped with a warning rather
+than aborting the run.
+
+**Minimal example** — the two `constrain_id: 1` rows are OR-alternatives, so satisfying
+either one is enough:
+
+```csv
+type,constrain_id,residue1_num,residue1_id,atom1,residue2_num,residue2_id,atom2,lower_bound,upper_bound
+NOE,1,3,LEU,MD1,17,VAL,HB,.,5.5
+NOE,1,3,LEU,MD2,17,VAL,HB,.,5.5
+NOE,2,5,TYR,QD,21,ALA,MB,1.8,4.0
+```
+
+Malformed files are rejected up front with a message naming the offending column,
+rather than failing later inside the loss.
+
+#### NMR output layout
+
+Both modes write:
+
+```
+<output_directory>/<id>_nmr_guided/diffusion_process/
+├── <id>_ensemble.pdb    # the ensemble: every relaxed structure as one MODEL
+├── <id>_metrics.csv     # NOE violation metrics
+└── verbose/             # per-structure intermediates (raw, _hyd_added, _colab_relaxed)
+```
+
+`<id>_ensemble.pdb` is the primary output. The per-structure files and their
+hydrogenated and relaxed derivatives are kept under `verbose/`.
 
 ## Experiment Tracking
 

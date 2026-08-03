@@ -129,9 +129,20 @@ class ProtenixModelManager:
             for sequence_type in [dictionary.get("sequence_type", "proteinChain")] * dictionary["count"]
         ]
 
-        if self.pdb_contains_missing_atoms:
+        if reference_pdb is None:
+            # Sequence-only mode (e.g. user-supplied NMR restraints with no deposited
+            # entry). Topology comes from the Protenix dataloader, which is built from
+            # the sequences, so the reference was only ever sizing the masks below.
+            self.reference_atom_locations = None
+            n_atoms_from_sequence = create_atom_mask(
+                self.full_sequences,
+                [[] for _ in self.full_sequences],
+                sequence_types=self.sequence_types,
+            ).shape[0]
+            self.resolved_pdb_to_full_mask = torch.ones(n_atoms_from_sequence, dtype=torch.bool, device=device)
+        elif self.pdb_contains_missing_atoms:
             self.reference_atom_locations, self.resolved_pdb_to_full_mask = load_pdb_atom_locations_full(
-                reference_pdb, 
+                reference_pdb,
                 full_sequences = self.full_sequences,
                 chains_to_read=chains_to_read,
                 sequence_types=self.sequence_types,
@@ -144,10 +155,11 @@ class ProtenixModelManager:
         # TODO: Advaith
         if self.ROI_residues is not None:
             self.ROI_atom_mask = create_atom_mask(self.full_sequences, ROI_residues, sequence_types=self.sequence_types).to(device)
-        else: 
-            self.ROI_atom_mask = torch.zeros_like(self.resolved_pdb_to_full_mask, dtype=torch.bool, device=self.reference_atom_locations.device)
+        else:
+            self.ROI_atom_mask = torch.zeros_like(self.resolved_pdb_to_full_mask, dtype=torch.bool)
 
-        self.reference_atom_locations = self.reference_atom_locations.to(device)
+        if self.reference_atom_locations is not None:
+            self.reference_atom_locations = self.reference_atom_locations.to(device)
 
         self.N_cycle = N_cycle
         self.diffusion_N = diffusion_N
@@ -190,6 +202,12 @@ class ProtenixModelManager:
         self._setup(device)
     
     def align_models_to_reference(self, strucutres, reduced_atom_mask=None):
+        if self.reference_atom_locations is None:
+            raise RuntimeError(
+                "align_models_to_reference() requires a reference structure, but this "
+                "ProtenixModelManager was built without one (reference_pdb=None). "
+                "Supply a reference PDB if alignment is needed."
+            )
         if reduced_atom_mask is not None:
             atom_mask = reduced_atom_mask
         else:
@@ -302,6 +320,14 @@ class ProtenixModelManager:
         configs = self._generate_configs(device)
         dataloader = get_inference_dataloader(configs=configs, msa_configuration=self._generate_msa_configuration())
         self.eval_data_dict, self.atom_array, _ = next(iter(dataloader))[0]
+        if self.reference_pdb is None and self.resolved_pdb_to_full_mask.shape[0] != self.atom_array.shape[0]:
+            # Sequence-derived mask sizing must agree with the dataloader topology, or
+            # every downstream mask is silently misaligned against the coordinates.
+            raise ValueError(
+                f"Sequence-derived atom count ({self.resolved_pdb_to_full_mask.shape[0]}) does not match "
+                f"the model topology ({self.atom_array.shape[0]}). Check that the supplied sequence "
+                f"matches the intended construct."
+            )
         self.runner = InferenceRunner(configs)
         device = self.runner.device
         self.protenix_model = self.runner.model

@@ -116,6 +116,28 @@ class CalculateNOE:
         # Filter rows conservatively
         self.nmr_data = _prefilter_restraints(nmr, atom_array, self.chain_indices)
 
+        # Guard against a silently meaningless evaluation. The atom arrays of every
+        # structure under comparison are intersected before this point, so a reference
+        # without hydrogens (e.g. a "fixed"/cleaned PDB rather than the deposited NMR
+        # ensemble) strips protons from all of them, and nearly every NOE row is dropped.
+        # The surviving handful then tends to report zero violations, which reads as a
+        # perfect fit rather than as an evaluation that never happened.
+        n_before, n_after = len(nmr), len(self.nmr_data)
+        if n_before and n_after / n_before < 0.5:
+            n_hydrogens = int(sum(1 for name in np.array(atom_array.atom_name) if str(name).startswith("H")))
+            print(
+                f"WARNING: only {n_after}/{n_before} NOE restraints are resolvable against the "
+                f"structures being compared ({len(atom_array)} atoms, {n_hydrogens} of them hydrogens). "
+                f"Reported violation numbers cover only those {n_after} restraints and are not "
+                f"comparable to a full evaluation."
+            )
+            if n_hydrogens == 0:
+                print(
+                    "WARNING: the compared atom set contains no hydrogens at all. If a reference "
+                    "structure was supplied, use one that retains hydrogens (the deposited NMR "
+                    "ensemble), not a hydrogen-stripped model."
+                )
+
         # Bounds
         self.nmr_data["lower_bound"] = self.nmr_data["lower_bound"].apply(lambda x: 0 if x == "." else x)
         self.lower_bound = torch.tensor(self.nmr_data["lower_bound"], dtype=torch.float32, device=device)

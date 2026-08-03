@@ -430,6 +430,246 @@ def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_
 
     return guided_config_file_path
 
+# Columns the guidance loss (NMRLossFunction) and the metrics (CalculateNOE) read by
+# name. Anything else in the file is ignored. See README "Restraint file format".
+REQUIRED_RESTRAINT_COLUMNS = [
+    "type",
+    "constrain_id",
+    "residue1_num",
+    "residue1_id",
+    "atom1",
+    "residue2_num",
+    "residue2_id",
+    "atom2",
+    "lower_bound",
+    "upper_bound",
+]
+
+
+def validate_restraint_csv(df, source=""):
+    """
+    Fail early and by name on a malformed restraint table.
+
+    Without this, a missing or non-numeric column surfaces much later as an opaque
+    torch.tensor dtype error from deep inside the loss constructor.
+    """
+    where = f" in {source}" if source else ""
+
+    missing = [c for c in REQUIRED_RESTRAINT_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Restraint file{where} is missing required column(s): {', '.join(missing)}. "
+            f"Required columns are: {', '.join(REQUIRED_RESTRAINT_COLUMNS)}. "
+            f"See the 'Restraint file format' table in the README."
+        )
+
+    if ("chain1" in df.columns) != ("chain2" in df.columns):
+        raise ValueError(
+            f"Restraint file{where} has only one of 'chain1'/'chain2'. Supply both "
+            f"(for inter-chain restraints) or neither (all restraints within-chain)."
+        )
+
+    noe = df[df["type"] == "NOE"]
+    if noe.shape[0] == 0:
+        raise ValueError(
+            f"Restraint file{where} contains no rows with type == 'NOE'. "
+            f"Only NOE rows are used for guidance; found types: "
+            f"{sorted(set(df['type'].astype(str)))}."
+        )
+
+    # constrain_id groups OR-alternatives and is cast to a numeric tensor downstream.
+    if pd.to_numeric(noe["constrain_id"], errors="coerce").isna().any():
+        raise ValueError(
+            f"Restraint file{where} has non-numeric values in 'constrain_id'. "
+            f"It must be an integer OR-group id."
+        )
+
+    # upper_bound has no "." handling downstream, unlike lower_bound.
+    if pd.to_numeric(noe["upper_bound"], errors="coerce").isna().any():
+        raise ValueError(
+            f"Restraint file{where} has non-numeric values in 'upper_bound' "
+            f"(note: '.' is accepted in 'lower_bound' but NOT in 'upper_bound'). "
+            f"Every NOE row needs a numeric upper bound."
+        )
+
+    return noe.shape[0]
+
+
+def prepare_custom_restraints(restraints_path, conformation_id, input_directory):
+    """
+    Normalize a user-supplied restraint file into the CSV the pipeline consumes.
+
+    Accepts either a CSV already in the documented schema, or a raw NMR-STAR
+    restraint file (.str/.mr) which is converted with extract_distance_restraints().
+    Returns the path to the CSV inside input_directory.
+    """
+    if not os.path.exists(restraints_path):
+        raise FileNotFoundError(f"Restraint file not found: {restraints_path}")
+
+    restraints_dir = os.path.join(input_directory, "restraints", conformation_id)
+    os.makedirs(restraints_dir, exist_ok=True)
+    csv_path = os.path.join(restraints_dir, f"{conformation_id}.csv")
+
+    extension = os.path.splitext(restraints_path)[1].lower()
+    if extension == ".csv":
+        df = pd.read_csv(restraints_path)
+    elif extension in (".str", ".mr"):
+        print(f"Converting NMR-STAR restraints {restraints_path} -> {csv_path}")
+        df = extract_distance_restraints(restraints_path, verbose=False)
+        if df.shape[0] == 0:
+            raise ValueError(
+                f"No distance restraints could be extracted from {restraints_path}. "
+                f"If this file is already in the pipeline CSV schema, pass it with a "
+                f".csv extension instead."
+            )
+    else:
+        raise ValueError(
+            f"Unsupported restraint file extension '{extension}' for {restraints_path}. "
+            f"Expected .csv (pipeline schema) or .str/.mr (NMR-STAR)."
+        )
+
+    n_noe = validate_restraint_csv(df, source=restraints_path)
+    df.to_csv(csv_path, index=False)
+    print(f"Prepared {n_noe} NOE restraints for '{conformation_id}' -> {csv_path}")
+    return csv_path
+
+
+def create_nmr_configuration_file_from_custom_inputs(
+    conformation_id,
+    sequence,
+    restraints_csv_path,
+    output_directory,
+    wandb_key,
+    wandb_project,
+    reference_pdb=None,
+    methyl_rdc_file=None,
+    amide_rdc_file=None,
+    amide_relax_file=None,
+    methyl_relax_file=None,
+    baseline_config_file_path="pipeline_configurations/nmr_baseline.yaml",
+):
+    """
+    Build a guidance config from a sequence + restraints, with no deposited entry.
+
+    Mirrors create_nmr_configuration_file_from_baseline() but takes the sequence and
+    identifier directly instead of reading a scraped metadata/ file.
+    """
+    configurations_folder = "generated_configurations"
+    os.makedirs(configurations_folder, exist_ok=True)
+
+    with open(baseline_config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    config["general"]["name"] = f"{conformation_id}_nmr_guided"
+    config["general"]["output_folder"] = f"{output_directory}"
+
+    # Protein parameters
+    config["protein"]["sequences"] = [
+        {"count": 1, "sequence": sequence, "sequence_type": "proteinChain"}
+    ]
+    config["protein"]["chains_to_use"] = [0]
+    config["protein"]["assembly_identifier"] = None
+    config["protein"]["pdb_id"] = conformation_id
+    config["protein"]["reference_raw_pdb_chain"] = "A"
+
+    # A reference structure is optional here: guidance needs only restraints, and the
+    # topology comes from the sequence. When absent, metrics skip the MD comparison.
+    config["protein"]["reference_pdb"] = reference_pdb
+    config["protein"]["reference_raw_pdb"] = reference_pdb
+    config["protein"]["contains_missing_atoms"] = reference_pdb is not None
+
+    # Loss function parameters
+    config["loss_function"]["nmr_loss_function"]["reference_nmr"] = restraints_csv_path
+    config["loss_function"]["nmr_loss_function"]["pdb_file"] = reference_pdb
+
+    # Order parameter scales + files
+    methyl_rdc_scale = 0.0 if methyl_rdc_file is None else 0.5
+    amide_rdc_scale = 0.0 if amide_rdc_file is None else 0.5
+    amide_relax_scale = 0.0 if amide_relax_file is None else 0.5
+    methyl_relax_scale = 0.0 if methyl_relax_file is None else 0.5
+
+    config["loss_function"]["nmr_loss_function"]["methyl_rdc_file"] = methyl_rdc_file
+    config["loss_function"]["nmr_loss_function"]["methyl_rdc_scale"] = methyl_rdc_scale
+    config["loss_function"]["nmr_loss_function"]["amide_rdc_file"] = amide_rdc_file
+    config["loss_function"]["nmr_loss_function"]["amide_rdc_scale"] = amide_rdc_scale
+    config["loss_function"]["nmr_loss_function"]["amide_relax_file"] = amide_relax_file
+    config["loss_function"]["nmr_loss_function"]["amide_relax_scale"] = amide_relax_scale
+    config["loss_function"]["nmr_loss_function"]["methyl_relax_file"] = methyl_relax_file
+    config["loss_function"]["nmr_loss_function"]["methyl_relax_scale"] = methyl_relax_scale
+
+    if wandb_key and wandb_project:
+        config["wandb"]["login_key"] = wandb_key
+        config["wandb"]["mode"] = "online"
+        config["wandb"]["project"] = wandb_project
+    else:
+        config["wandb"]["mode"] = "disabled"
+        config["wandb"]["project"] = None
+        config["wandb"]["login_key"] = None
+
+    guided_config = deepcopy(config)
+    guided_config["general"]["apply_diffusion_guidance"] = True
+    guided_config_file_path = os.path.join(
+        configurations_folder, f"{guided_config['general']['name']}.yaml"
+    )
+    with open(guided_config_file_path, "w") as f:
+        yaml.safe_dump(guided_config, f)
+
+    return guided_config_file_path
+
+
+def main_from_custom_inputs(
+    conformation_id,
+    sequence,
+    restraints_path,
+    input_directory,
+    output_directory,
+    wandb_key,
+    wandb_project,
+    reference_pdb=None,
+    methyl_rdc_file=None,
+    amide_rdc_file=None,
+    amide_relax_file=None,
+    methyl_relax_file=None,
+):
+    """Custom-input entry point: conformation id + sequence + restraint file."""
+    baseline_config_file_path = "pipeline_configurations/nmr_baseline.yaml"
+
+    restraints_csv_path = prepare_custom_restraints(
+        restraints_path, conformation_id, input_directory
+    )
+
+    order_parameters_dir = os.path.join(input_directory, "order_parameters", conformation_id)
+    order_param_paths = {}
+    for label, source in (
+        ("methyl_rdc", methyl_rdc_file),
+        ("amide_rdc", amide_rdc_file),
+        ("amide_relax", amide_relax_file),
+        ("methyl_relax", methyl_relax_file),
+    ):
+        if source is None:
+            order_param_paths[label] = None
+            continue
+        os.makedirs(order_parameters_dir, exist_ok=True)
+        destination = os.path.join(order_parameters_dir, os.path.basename(source))
+        shutil.copy(source, destination)
+        order_param_paths[label] = destination
+
+    return create_nmr_configuration_file_from_custom_inputs(
+        conformation_id,
+        sequence,
+        restraints_csv_path,
+        output_directory,
+        wandb_key,
+        wandb_project,
+        reference_pdb=reference_pdb,
+        methyl_rdc_file=order_param_paths["methyl_rdc"],
+        amide_rdc_file=order_param_paths["amide_rdc"],
+        amide_relax_file=order_param_paths["amide_relax"],
+        methyl_relax_file=order_param_paths["methyl_relax"],
+        baseline_config_file_path=baseline_config_file_path,
+    )
+
+
 def main(pdb_id, input_directory, output_directory, wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None):
     # Input files
     baseline_config_file_path="pipeline_configurations/nmr_baseline.yaml"

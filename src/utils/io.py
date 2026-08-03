@@ -393,6 +393,44 @@ def load_pdb_atom_locations(pdb_file, device="cpu", single_model=True):
     atom_positions_tensor = torch.tensor(atom_positions_array, dtype=torch.float32, device=device)
     return atom_positions_tensor  # shape: (1, N, 3) or (M, N, 3)
 
+def write_multi_model_pdb(pdb_files, out_path):
+    """
+    Combine single-model PDBs into one multi-model PDB (one MODEL record each).
+
+    This is the user-facing ensemble output. Note this is deliberately not
+    merge_ensamble.merge_ensamble_folder(), which collapses an ensemble into a single
+    model using altloc labels and fractional occupancies for crystallographic work.
+    Here each input structure stays a distinct model.
+
+    Returns out_path, or None if pdb_files is empty.
+    """
+    if not pdb_files:
+        return None
+
+    combined = gemmi.Structure()
+    for model_index, pdb_file in enumerate(pdb_files, start=1):
+        source = gemmi.read_structure(pdb_file)
+        if len(source) == 0:
+            continue
+        model = source[0].clone()
+        model.name = str(model_index)
+        combined.add_model(model)
+
+    if len(combined) == 0:
+        return None
+
+    # Carry over cell/spacegroup from the first input so the header is well formed.
+    first = gemmi.read_structure(pdb_files[0])
+    combined.cell = first.cell
+    combined.spacegroup_hm = first.spacegroup_hm
+    combined.setup_entities()
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    combined.write_pdb(out_path)
+    return out_path
+
 def write_back_pdb_coordinates(original_pdb_file, output_pdb_file, new_positions_tensor):
     # Step 1: Load the original structure
     structure = gemmi.read_structure(original_pdb_file)

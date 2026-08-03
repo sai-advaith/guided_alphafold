@@ -124,7 +124,11 @@ class NMRLossFunction(AbstractLossFunction):
 
         self.fragment_library = FragmentLibrary.standard_library()
         self.name_library = AtomNameLibrary.standard_library()
-        self.reference_atom_locations = load_pdb_atom_locations(pdb_file).to(device)
+        # Optional: the loss operates purely on restraints and the predicted coordinates,
+        # so a reference structure is not required. Kept for callers that pass one.
+        self.reference_atom_locations = (
+            load_pdb_atom_locations(pdb_file).to(device) if pdb_file else None
+        )
 
         # OR grouping
         or_ids = torch.tensor(self.nmr_data["constrain_id"], dtype=torch.float32, device=device)
