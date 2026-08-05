@@ -70,7 +70,7 @@ def create_density_configuration_file_from_baseline(pdb_id, chain, input_directo
     config["general"]["output_folder"] = f"{output_directory}/{map_type}"
 
     # Protein parameters (only monomers supported for now)
-    config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"]}]
+    config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"], "sequence_type": "proteinChain"}]
     config["protein"]["chains_to_use"] = [0]
     config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = pdb_id

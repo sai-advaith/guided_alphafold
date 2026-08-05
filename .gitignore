@@ -221,3 +221,6 @@ em_pipeline_inputs/*
 nmr_pipeline_inputs/*
 xray_pipeline_inputs/*
 cryo_pipeline_inputs/*
+
+# MSA server scratch written by run_mmseqs2 (prefix="tmp/")
+tmp/

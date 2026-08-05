@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .io import chain_segments_from_atom_array
+
 
 # ============================== Group helpers ============================== #
 def methyl_group_names(nmr_name: str, residue_name: str) -> List[str]:
@@ -52,13 +54,14 @@ def q_group_names(nmr_name: str, residue_name: str) -> List[str]:
 
 # ============================== I/O utilities ============================= #
 def _equal_segments(atom_array) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
-    """Infer chain IDs and equal-length [start, stop) segments (assumes equal partitions)."""
-    chain_ids = np.unique(atom_array.chain_id)
-    chain_ids = np.array([c[0] if isinstance(c, (list, tuple, np.ndarray)) else c for c in chain_ids])
-    n_total = len(atom_array)
-    n_per_chain = n_total // len(chain_ids)
-    cuts = [(i * n_per_chain, (i + 1) * n_per_chain) for i in range(len(chain_ids))]
-    return chain_ids, cuts
+    """
+    Infer chain IDs and per-chain [start, stop) segments.
+
+    Delegates to the shared helper, which derives boundaries from contiguous chain_id
+    runs so hetero-complexes are segmented correctly. The name is kept for callers; the
+    "equal partitions" assumption it used to make is gone.
+    """
+    return chain_segments_from_atom_array(atom_array)
 
 
 def _prefilter_restraints(
@@ -116,6 +119,28 @@ class CalculateNOE:
         # Filter rows conservatively
         self.nmr_data = _prefilter_restraints(nmr, atom_array, self.chain_indices)
 
+        # Guard against a silently meaningless evaluation. The atom arrays of every
+        # structure under comparison are intersected before this point, so a reference
+        # without hydrogens (e.g. a "fixed"/cleaned PDB rather than the deposited NMR
+        # ensemble) strips protons from all of them, and nearly every NOE row is dropped.
+        # The surviving handful then tends to report zero violations, which reads as a
+        # perfect fit rather than as an evaluation that never happened.
+        n_before, n_after = len(nmr), len(self.nmr_data)
+        if n_before and n_after / n_before < 0.5:
+            n_hydrogens = int(sum(1 for name in np.array(atom_array.atom_name) if str(name).startswith("H")))
+            print(
+                f"WARNING: only {n_after}/{n_before} NOE restraints are resolvable against the "
+                f"structures being compared ({len(atom_array)} atoms, {n_hydrogens} of them hydrogens). "
+                f"Reported violation numbers cover only those {n_after} restraints and are not "
+                f"comparable to a full evaluation."
+            )
+            if n_hydrogens == 0:
+                print(
+                    "WARNING: the compared atom set contains no hydrogens at all. If a reference "
+                    "structure was supplied, use one that retains hydrogens (the deposited NMR "
+                    "ensemble), not a hydrogen-stripped model."
+                )
+
         # Bounds
         self.nmr_data["lower_bound"] = self.nmr_data["lower_bound"].apply(lambda x: 0 if x == "." else x)
         self.lower_bound = torch.tensor(self.nmr_data["lower_bound"], dtype=torch.float32, device=device)
@@ -143,8 +168,26 @@ class CalculateNOE:
         self.inter_data = self.nmr_data[self.single_chain_mask_np]
         self.intra_data = self.nmr_data[self.multi_chain_mask_np]
 
-        # Total constraints follows project logic: within_or * n_chains + multi_or
-        self.total_constraints = int(len(self.within_unique_or) * len(self.chain_indices) + len(self.multi_unique_or))
+        # Which within-chain rows belong to which chain (see _build_passes). None means
+        # "no chain columns", i.e. apply every within-chain row to every chain.
+        self.within_indices_by_label = None
+        if self.chain1_col is not None:
+            by_label = defaultdict(list)
+            for k in np.nonzero(self.single_chain_mask_np)[0]:
+                by_label[str(self.chain1_col[k])].append(int(k))
+            self.within_indices_by_label = dict(by_label)
+
+        # Denominator must match what is actually evaluated: with chain columns, the
+        # per-chain OR-group counts summed over chains; without them, within_or * n_chains.
+        if self.within_indices_by_label is None:
+            within_total = len(self.within_unique_or) * len(self.chain_indices)
+        else:
+            or_ids_np = np.asarray(self.nmr_data["constrain_id"])
+            within_total = sum(
+                len(set(or_ids_np[self.within_indices_by_label.get(str(label), [])]))
+                for label in self.chain_ids
+            )
+        self.total_constraints = int(within_total + len(self.multi_unique_or))
 
         # Pair index map (only if multi present)
         self.pair_to_indices: Dict[Tuple[str, str], List[int]] = defaultdict(list)
@@ -263,9 +306,16 @@ class CalculateNOE:
         kinds: List[str] = []
         pass_chain_meta: List[Tuple[str, str]] = []
 
-        # WITHIN: rows where chain1==chain2 (or all rows if no chain columns)
-        sc_indices = np.nonzero(self.single_chain_mask_np)[0].tolist()
+        # WITHIN: with chain columns, each chain is evaluated only against the restraints
+        # naming it. Without them, every chain gets every within-chain row, which is right
+        # for a monomer or homo-oligomer but would otherwise score one chain's restraints
+        # against another chain's coordinates in a hetero-complex.
+        sc_indices_all = np.nonzero(self.single_chain_mask_np)[0].tolist()
         for ci, lbl in enumerate(self.chain_ids):
+            if self.within_indices_by_label is None:
+                sc_indices = sc_indices_all
+            else:
+                sc_indices = self.within_indices_by_label.get(str(lbl), [])
             D, m = self._gather_pass(structures, sc_indices, ci, ci)
             per_pass.append((D, m))
             kinds.append("within")

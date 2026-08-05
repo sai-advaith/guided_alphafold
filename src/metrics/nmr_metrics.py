@@ -108,7 +108,11 @@ def generate_config_list(folder_path, pdb_id, add_hydrogen, relax_colabfold):
     configs_lst = []
     print(len(os.listdir(folder_path)))
 
-    model_folder = "diffusion_process"
+    # Structures now live in diffusion_process/verbose/ alongside their hydrogenated and
+    # relaxed derivatives. Fall back to diffusion_process/ for output written before that.
+    model_folder = os.path.join("diffusion_process", "verbose")
+    if not os.path.exists(f"{folder_path}/{model_folder}"):
+        model_folder = "diffusion_process"
     if not os.path.exists(f"{folder_path}/{model_folder}"):
         print(f"Metrics for {pdb_id} failed")
         exit(0)
@@ -171,19 +175,27 @@ def reorder_atom_arrays(configs_lst, non_alph_struct):
 
     
 
-def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdbs_output_folder, md_file_path, order_params_files=None):
-    pdb_id = os.path.basename(file).split(".")[0]
-    
+def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdbs_output_folder, md_file_path, order_params_files=None, pdb_id=None):
+    # pdb_id is passed explicitly so a custom identifier is reported instead of the
+    # restraint file's basename; fall back to the old behaviour when not supplied.
+    if pdb_id is None:
+        pdb_id = os.path.basename(file).split(".")[0]
+
     print(f"Processing {pdb_id}")
-    
-    gt_file = md_file_path
-    gt_atom_stack = get_atom_array_from_pdb_file(gt_file)
-    gt_atom_array = [gt_atom_stack] if isinstance(gt_atom_stack, AtomArray) else [gt_atom_stack[i] for i in range(gt_atom_stack.stack_depth())]
-    gt_structure = torch.from_numpy(np.stack([a.coord for a in gt_atom_array])).to(torch.float32)
-    gt_structure = gt_structure if len(gt_structure.shape)==3 else gt_structure[None]
-    
+
     configs_lst = generate_config_list(pdbs_output_folder, pdb_id, add_hydrogen, relax_colabfold)
-    configs_lst.append({"name": "MD", "folder": gt_file,"structures": gt_structure, "structures_files": [gt_file], "atom_array": gt_atom_array})
+
+    # A reference structure is optional: with user-supplied restraints there may be no
+    # deposited entry to compare against, in which case metrics are guided-only.
+    if md_file_path:
+        gt_file = md_file_path
+        gt_atom_stack = get_atom_array_from_pdb_file(gt_file)
+        gt_atom_array = [gt_atom_stack] if isinstance(gt_atom_stack, AtomArray) else [gt_atom_stack[i] for i in range(gt_atom_stack.stack_depth())]
+        gt_structure = torch.from_numpy(np.stack([a.coord for a in gt_atom_array])).to(torch.float32)
+        gt_structure = gt_structure if len(gt_structure.shape)==3 else gt_structure[None]
+        configs_lst.append({"name": "MD", "folder": gt_file,"structures": gt_structure, "structures_files": [gt_file], "atom_array": gt_atom_array})
+    else:
+        print("No reference structure supplied; skipping the MD comparison row.")
 
     non_alph_struct = 1
 
@@ -236,8 +248,8 @@ def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_pr
 
 
 
-def run_nmr_metrics(pdb_output_folder, md_file, restraint_file, add_hydrogen, relax_colabfold, results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False):
+def run_nmr_metrics(pdb_output_folder, md_file, restraint_file, add_hydrogen, relax_colabfold, results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False, pdb_id=None):
     evaluations = {"noe": noe, "s2": order_params}
-    results = process_file(restraint_file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdb_output_folder, md_file, order_params_files)
+    results = process_file(restraint_file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdb_output_folder, md_file, order_params_files, pdb_id=pdb_id)
     results = pd.DataFrame(results)
     results.to_csv(results_path, index=False)

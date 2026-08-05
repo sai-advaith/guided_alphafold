@@ -1,6 +1,7 @@
 from alphafold.relax import relax
 from alphafold.common import protein, residue_constants
 import gemmi
+import os
 
 MODRES = {'MSE':'MET','MLY':'LYS','FME':'MET','HYP':'PRO',
           'TPO':'THR','CSO':'CYS','SEP':'SER','M3L':'LYS',
@@ -115,26 +116,41 @@ def fix_met_to_mse_based_on_reference(reference_pdb, target_pdb):
   target_structure.write_pdb(target_pdb)
 
 def relax_pdb(pdb_in, pdb_out, max_iterations=2000, tolerance=2.39, stiffness=10.0, use_gpu=False, reorder_atoms=True):
-    mse_to_met(pdb_in, pdb_out)
-    pdb_str = pdb_to_string(pdb_out)
-    protein_obj = protein.from_pdb_string(pdb_str)
-    amber_relaxer = relax.AmberRelaxation(
-      max_iterations=max_iterations,
-      tolerance=tolerance,
-      stiffness=stiffness,
-      exclude_residues=[],
-      max_outer_iterations=3,
-      use_gpu=use_gpu
-    )
-    # try 3 times, sometimes it fails for the first try for some reason
-    for _ in range(3):
-      try:
-        relaxed_pdb_lines, _, _ = amber_relaxer.process(prot=protein_obj)
-        break
-      except Exception as e:
-        print(e)
-    with open(pdb_out, 'w') as f:
-        f.write(relaxed_pdb_lines)
-    fix_met_to_mse_based_on_reference(pdb_in, pdb_out)
-    if reorder_atoms:
-      reorder_pdb_atoms(pdb_in, pdb_out) # for some reason it changes the atom order in the pdb, and that can cause bugs
+    # Build into a temp path and only publish pdb_out on success. Callers such as
+    # nmr_metrics.ensure_relaxed() treat the presence of pdb_out as "already relaxed",
+    # so a partially written pdb_out would be silently reused as if it were relaxed.
+    tmp_out = pdb_out + ".tmp"
+    try:
+      mse_to_met(pdb_in, tmp_out)
+      pdb_str = pdb_to_string(tmp_out)
+      protein_obj = protein.from_pdb_string(pdb_str)
+      amber_relaxer = relax.AmberRelaxation(
+        max_iterations=max_iterations,
+        tolerance=tolerance,
+        stiffness=stiffness,
+        exclude_residues=[],
+        max_outer_iterations=3,
+        use_gpu=use_gpu
+      )
+      # try 3 times, sometimes it fails for the first try for some reason
+      relaxed_pdb_lines, last_error = None, None
+      for _ in range(3):
+        try:
+          relaxed_pdb_lines, _, _ = amber_relaxer.process(prot=protein_obj)
+          break
+        except Exception as e:
+          last_error = e
+          print(e)
+      if relaxed_pdb_lines is None:
+        # Fail loudly instead of raising NameError on the write below
+        raise RuntimeError(f"AMBER relaxation failed after 3 attempts for {pdb_in}") from last_error
+      with open(tmp_out, 'w') as f:
+          f.write(relaxed_pdb_lines)
+      fix_met_to_mse_based_on_reference(pdb_in, tmp_out)
+      if reorder_atoms:
+        reorder_pdb_atoms(pdb_in, tmp_out) # for some reason it changes the atom order in the pdb, and that can cause bugs
+      os.replace(tmp_out, pdb_out) # atomic: pdb_out is either absent or fully relaxed
+    except BaseException:
+      if os.path.exists(tmp_out):
+        os.remove(tmp_out)
+      raise

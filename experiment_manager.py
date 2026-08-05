@@ -306,14 +306,18 @@ class ExperimentManager:
                     bfactors=esp_loss_function_obj.bfactor_gt
                 )
         elif "nmr" in self.config.loss_function.loss_function_type:
-            # Saving pdbs
+            # Per-structure PDBs are intermediates: the hydrogenation and relaxation
+            # stages write their derivatives alongside them, so keep the whole lot in
+            # verbose/ and leave the merged ensemble as the top-level output.
+            verbose_path = os.path.join(folder_path, "verbose")
+            os.makedirs(verbose_path, exist_ok=True)
             for i in range(structures.shape[0]):
                 save_structure_full(
                     structures[i].cpu(),
                     self.model_manager.full_sequences,
                     self.model_manager.sequence_types,
                     self.model_manager.atom_array,
-                    f"{folder_path}/{name}_{i}.pdb",
+                    os.path.join(verbose_path, f"{name}_{i}.pdb"),
                     bfactors=None,
                 )
         else:
@@ -377,8 +381,14 @@ class ExperimentManager:
                     loss_value.backward()
                     steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
                 
+                    # Get guidance and add to structures (noisy variable)
                     with torch.no_grad():
-                        guidance_direction = structures.grad if i > start_guidance_from else None
+                        guidance_direction = structures.grad
+                        if normalize_gradients and not (guidance_direction.abs() < 1e-6).all():
+                            normalization_norm = guidance_direction.flatten(1,-1).norm(dim=-1)
+                            normalization_norm[normalization_norm < 1e-4] = 1
+                            guidance_direction = guidance_direction / normalization_norm[:,None, None]
+                        guidance_direction = guidance_direction * structures_gradient_norm
                         structures.grad = None
 
             structures = self.model_manager.get_x_t_from_x_0_hat(
@@ -389,7 +399,6 @@ class ExperimentManager:
             if self.loss_function is not None:
                 self.loss_function.post_optimization_step()
             if i < self.config.model_manager.diffusion_N - 1:
-                # structures = self.model_manager.get_x_noisy(structures, i + 1)
                 structures = self.model_manager.get_x_noisy(structures, start_index=start_idx, end_index=end_idx)
             structures = structures.detach().clone()
             if self.receipt_ledger is not None and (
@@ -413,7 +422,9 @@ class ExperimentManager:
 
         structures = self.run_full_diffusion_process(latents)
         sub_folder_name = "diffusion_process"
-        self.save_state(structures, self.config.protein.pdb_id[:4], os.path.join(self.experiment_save_dir, sub_folder_name))
+        # Full identifier, not pdb_id[:4]: a no-op for 4-character PDB IDs, but keeps a
+        # user-supplied conformation identifier from being truncated (my_conf_A -> my_c).
+        self.save_state(structures, self.config.protein.pdb_id, os.path.join(self.experiment_save_dir, sub_folder_name))
         if self.receipt_ledger is not None:
             self.receipt_ledger.record_tensor("final_ensemble", structures, stage_index=None)
             manifest = self.receipt_ledger.finalize(

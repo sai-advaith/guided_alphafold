@@ -12,7 +12,7 @@ from biotite.structure.io import load_structure
 
 from .s_2_loss_function import S2LossFunction
 from ..protenix.metrics.rmsd import self_aligned_rmsd
-from ..utils.io import load_pdb_atom_locations
+from ..utils.io import load_pdb_atom_locations, chain_segments_from_atom_array
 from ..utils.hydrogen_addition import (
     FragmentLibrary,
     AtomNameLibrary,
@@ -124,7 +124,11 @@ class NMRLossFunction(AbstractLossFunction):
 
         self.fragment_library = FragmentLibrary.standard_library()
         self.name_library = AtomNameLibrary.standard_library()
-        self.reference_atom_locations = load_pdb_atom_locations(pdb_file).to(device)
+        # Optional: the loss operates purely on restraints and the predicted coordinates,
+        # so a reference structure is not required. Kept for callers that pass one.
+        self.reference_atom_locations = (
+            load_pdb_atom_locations(pdb_file).to(device) if pdb_file else None
+        )
 
         # OR grouping
         or_ids = torch.tensor(self.nmr_data["constrain_id"], dtype=torch.float32, device=device)
@@ -134,12 +138,44 @@ class NMRLossFunction(AbstractLossFunction):
         # restraint tuples used by gather
         self.hydrogen_guidance_params = self._build_guidance_params()
 
-        # chain segmentation (assumes equal-length segments in atom_array per chain)
-        self.chain_ids = np.unique(atom_array.chain_id)
-        self.chain_ids = np.array([c[0] for c in self.chain_ids])
+        # chain segmentation from real chain boundaries, so chains of differing length
+        # (hetero-complexes) are handled; an even split is only correct for homo-oligomers
+        self.chain_ids, self.chain_indices = chain_segments_from_atom_array(atom_array)
         self.n_chains = self.chain_ids.size
-        self.chain_indices = self._compute_chain_segments(atom_array)
-        self.num_constraints = len(self.within_chain_unique_or)*self.n_chains+ len(self.multi_chain_unique_or)
+
+        # Which within-chain rows belong to which chain. With explicit chain columns a row
+        # is applied only to the chain it names; without them every row is applied to every
+        # chain. The latter is correct for a monomer or a homo-oligomer (identical copies),
+        # but for a hetero-complex it would evaluate one chain's restraints against
+        # another's coordinates -- and where residue numbers coincide that silently
+        # enforces a meaningless restraint rather than dropping it.
+        self.within_indices_by_label = None
+        if self.chain1_col is not None:
+            by_label = defaultdict(list)
+            for k in np.nonzero(self.single_chain_mask_np)[0]:
+                by_label[str(self.chain1_col[k])].append(int(k))
+            self.within_indices_by_label = dict(by_label)
+
+        if self.within_indices_by_label is None:
+            within_total = len(self.within_chain_unique_or) * self.n_chains
+        else:
+            or_ids_np = np.asarray(self.nmr_data["constrain_id"])
+            within_total = sum(
+                len(set(or_ids_np[self.within_indices_by_label.get(str(label), [])]))
+                for label in self.chain_ids
+            )
+        self.num_constraints = within_total + len(self.multi_chain_unique_or)
+
+        if self.chain1_col is None and self.n_chains > 1:
+            chain_lengths = {stop - start for start, stop in self.chain_indices}
+            if len(chain_lengths) > 1:
+                print(
+                    f"WARNING: this model has chains of differing length "
+                    f"({sorted(chain_lengths)} atoms) but the restraint file has no "
+                    f"'chain1'/'chain2' columns, so every within-chain restraint is applied "
+                    f"to every chain. For a hetero-complex add chain columns naming the "
+                    f"chain each restraint belongs to (labels {list(self.chain_ids)})."
+                )
 
 
         # mapping of explicit cross-chain pairs -> constraint indices
@@ -147,6 +183,17 @@ class NMRLossFunction(AbstractLossFunction):
 
         # order parameter losses (constructed with the first chain's topology)
         chain_atom_array0 = atom_array[self.chain_indices[0][0] : self.chain_indices[0][1]]
+        if any((methyl_relax_file, methyl_rdc_file, amide_rdc_file, amide_relax_file)):
+            chain_lengths = {stop - start for start, stop in self.chain_indices}
+            if len(chain_lengths) > 1:
+                raise ValueError(
+                    f"Order-parameter losses are built from the first chain's topology and "
+                    f"applied to every chain, which is only valid when all chains are "
+                    f"identical. This model has chains of differing length "
+                    f"({sorted(chain_lengths)} atoms). Remove the order-parameter files "
+                    f"(--methyl_relax_file/--methyl_rdc_file/--amide_rdc_file/"
+                    f"--amide_relax_file) or use a homo-oligomeric construct."
+                )
         self.methyl_relax_scale = methyl_relax_scale
         self.methyl_rdc_scale = methyl_rdc_scale
         self.amide_rdc_scale = amide_rdc_scale
@@ -155,6 +202,11 @@ class NMRLossFunction(AbstractLossFunction):
         self.methyl_rdc_loss = S2LossFunction(chain_atom_array0, methyl_rdc_file, device, type="methyl_rdc") if methyl_rdc_file else None
         self.amide_rdc_loss = S2LossFunction(chain_atom_array0, amide_rdc_file, device, type="amide_rdc") if amide_rdc_file else None
         self.amide_relax_loss = S2LossFunction(chain_atom_array0, amide_relax_file, device, type="amide_relax") if amide_relax_file else None
+
+        # Chain labels in the restraint file that match no model chain; warned about once.
+        self._warned_unmatched_pairs = set()
+        # Model chains with no within-chain restraints; warned about once.
+        self._warned_empty_chains = set()
 
         # logging state
         self._reset_logs()
@@ -188,14 +240,6 @@ class NMRLossFunction(AbstractLossFunction):
                 )
             )
         return out
-
-    def _compute_chain_segments(self, atom_array) -> List[Tuple[int, int]]:
-        """Compute [start, end) slices per chain (assumes equal-length chains)."""
-        n_total = len(atom_array)
-        n_per_chain = n_total // self.n_chains
-        starts = np.arange(0, n_total, n_per_chain)
-        stops = starts + n_per_chain
-        return list(zip(starts, stops))
 
     def _build_pair_index_map(self) -> Dict[Tuple[str, str], List[int]]:
         """Map explicit (chain1, chain2) to row indices for cross-chain constraints."""
@@ -390,9 +434,23 @@ class NMRLossFunction(AbstractLossFunction):
         noe_within = torch.tensor(0.0, device=self.device)
         noe_multi = torch.tensor(0.0, device=self.device)
 
-        # ---- WITHIN-CHAIN: apply same within-chain constraints to every chain ---- #
-        sc_indices = np.nonzero(self.single_chain_mask_np)[0].tolist()
+        # ---- WITHIN-CHAIN ---- #
+        # With chain columns, each chain gets only the restraints naming it. Without them,
+        # every chain gets every within-chain restraint (monomer / homo-oligomer default).
+        sc_indices_all = np.nonzero(self.single_chain_mask_np)[0].tolist()
         for cidx in range(self.n_chains):
+            label = str(self.chain_ids[cidx])
+            if self.within_indices_by_label is None:
+                sc_indices = sc_indices_all
+            else:
+                sc_indices = self.within_indices_by_label.get(label, [])
+                if not sc_indices and label not in self._warned_empty_chains:
+                    self._warned_empty_chains.add(label)
+                    print(
+                        f"WARNING: no within-chain restraints reference chain '{label}'. "
+                        f"Its geometry is unconstrained by NOE data. Chain labels present in "
+                        f"the restraint file: {sorted(self.within_indices_by_label)}."
+                    )
             ctx = chain_cache[cidx]
             res = self._evaluate_index_block(sc_indices, ctx, ctx, within_chain=True)
             if res is not None:
@@ -413,6 +471,18 @@ class NMRLossFunction(AbstractLossFunction):
             label_to_index = {lbl: i for i, lbl in enumerate(self.chain_ids)}
             for (c1, c2), idxs in self.pair_to_indices.items():
                 if c1 not in label_to_index or c2 not in label_to_index:
+                    # Silently skipping these would leave them in num_constraints while
+                    # never contributing violations, making the satisfaction metrics look
+                    # better than reality. Warn once per unmatched pair.
+                    if (c1, c2) not in self._warned_unmatched_pairs:
+                        self._warned_unmatched_pairs.add((c1, c2))
+                        print(
+                            f"WARNING: {len(idxs)} inter-chain restraint(s) reference chains "
+                            f"'{c1}'/'{c2}', which are not among the model's chains "
+                            f"{sorted(label_to_index)}. They are excluded from guidance. "
+                            f"Chain labels in the restraint file must match the model's chain "
+                            f"order (A, B, C, ... following --sequences/--counts)."
+                        )
                     continue
                 i, j = label_to_index[c1], label_to_index[c2]
                 res = self._evaluate_index_block(idxs, chain_cache[i], chain_cache[j], within_chain=False)

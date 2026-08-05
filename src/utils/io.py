@@ -393,6 +393,81 @@ def load_pdb_atom_locations(pdb_file, device="cpu", single_model=True):
     atom_positions_tensor = torch.tensor(atom_positions_array, dtype=torch.float32, device=device)
     return atom_positions_tensor  # shape: (1, N, 3) or (M, N, 3)
 
+def chain_segments_from_atom_array(atom_array):
+    """
+    True per-chain [start, stop) atom boundaries, plus normalized chain labels.
+
+    Boundaries come from contiguous runs of atom_array.chain_id rather than from
+    dividing the atom count evenly, so chains of differing length (hetero-complexes)
+    are segmented correctly. An even split only happens to be right for homo-oligomers.
+
+    Labels are normalized to their first character because the two sources disagree:
+    the Protenix dataloader emits "A0"/"B1" while structures written by
+    save_structure_full() (and hence read back by the metrics) use "A"/"B". Restraint
+    files are expected to use the single-character form.
+
+    Returns (labels: np.ndarray[str], segments: List[Tuple[int, int]]).
+    """
+    chain_id = np.asarray(atom_array.chain_id)
+    n_total = len(chain_id)
+    if n_total == 0:
+        return np.array([], dtype=object), []
+
+    def normalize(value):
+        if isinstance(value, (list, tuple, np.ndarray)):
+            value = value[0]
+        text = str(value)
+        return text[0] if text else text
+
+    labels, segments = [], []
+    start = 0
+    for index in range(1, n_total + 1):
+        if index == n_total or chain_id[index] != chain_id[start]:
+            labels.append(normalize(chain_id[start]))
+            segments.append((start, index))
+            start = index
+
+    return np.array(labels, dtype=object), segments
+
+
+def write_multi_model_pdb(pdb_files, out_path):
+    """
+    Combine single-model PDBs into one multi-model PDB (one MODEL record each).
+
+    This is the user-facing ensemble output. Note this is deliberately not
+    merge_ensamble.merge_ensamble_folder(), which collapses an ensemble into a single
+    model using altloc labels and fractional occupancies for crystallographic work.
+    Here each input structure stays a distinct model.
+
+    Returns out_path, or None if pdb_files is empty.
+    """
+    if not pdb_files:
+        return None
+
+    combined = gemmi.Structure()
+    for model_index, pdb_file in enumerate(pdb_files, start=1):
+        source = gemmi.read_structure(pdb_file)
+        if len(source) == 0:
+            continue
+        model = source[0].clone()
+        model.name = str(model_index)
+        combined.add_model(model)
+
+    if len(combined) == 0:
+        return None
+
+    # Carry over cell/spacegroup from the first input so the header is well formed.
+    first = gemmi.read_structure(pdb_files[0])
+    combined.cell = first.cell
+    combined.spacegroup_hm = first.spacegroup_hm
+    combined.setup_entities()
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    combined.write_pdb(out_path)
+    return out_path
+
 def write_back_pdb_coordinates(original_pdb_file, output_pdb_file, new_positions_tensor):
     # Step 1: Load the original structure
     structure = gemmi.read_structure(original_pdb_file)
@@ -670,13 +745,14 @@ def query_msa_server(msa_full_save_dir, sequence_dictionary):
                 # creating a subfolder for each unique sequence
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/non_pairing.a3m'), 'w') as f:
                     f.write(msa_unpaired[protein_idx])
-                    protein_idx += 1
                 with open(os.path.join(msa_full_save_dir, f'msa/{i+1}/pairing.a3m'), 'w') as f:
                     # if there are more than one unique sequence, we can do pairing
                     if len(set(sequences)) > 1:
-                        f.write(msa_paired[i])
-                    else:
-                        continue
+                        # Indexed over protein sequences only, like msa_unpaired above --
+                        # not over sequence_dictionary, which may also hold DNA/RNA entries.
+                        f.write(msa_paired[protein_idx])
+                # Advance only after both writes, so both use this sequence's protein index.
+                protein_idx += 1
 
 def delete_hydrogens(pdb_file):
     # Load the structure

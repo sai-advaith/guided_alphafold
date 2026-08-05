@@ -720,9 +720,11 @@ def _fragment_batch(coords, bonds, names, elements, res_name, device):
         n_heavy_bonds = np.count_nonzero(heavy_mask)
         if n_heavy_bonds == 0:
             # The orientation is arbitrary
-            # -> The fragment coord is the coord of the central atom
-            # 4 times repeated
-            heavy_coord = torch.repeat(coords[:, None, i, :], 3, axis=0)
+            # -> The fragment coord is the coord of the central atom, repeated to the
+            # same (batch, 3, 3) shape the other branches below produce.
+            # (Was torch.repeat(..., axis=0), which is not a PyTorch function at all, so
+            # this branch raised AttributeError whenever it was reached.)
+            heavy_coord = coords[:, [i, i, i]]
             stereo = torch.zeros((coords.shape[0]))
         elif n_heavy_bonds == 1:
             # Include one atom further away
