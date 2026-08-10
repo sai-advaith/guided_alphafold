@@ -100,6 +100,17 @@ def main():
         default=None,
         help="Optional reference structure (custom mode). When given, metrics include the MD comparison row.",
     )
+    parser.add_argument(
+        '--start_residue_from',
+        type=int,
+        default=None,
+        help=(
+            "Residue number that the FIRST residue of --sequences carries in your restraint "
+            "file. Default 1, i.e. the restraint numbering already matches the sequence. "
+            "Set this when restraints use author numbering (e.g. 157 for a construct whose "
+            "sequence starts at 1); output PDBs are then written in that same numbering."
+        ),
+    )
     parser.add_argument('--input_directory', type=str, required=False, default="nmr_pipeline_inputs")
     parser.add_argument('--output_directory', type=str, required=False, default="nmr_pipeline_outputs")
     parser.add_argument('--wandb_key', type=str, required=False, default=None)
@@ -136,9 +147,12 @@ def main():
     }
     supplied = {flag: value for flag, value in custom_flags.items() if value is not None}
 
-    for flag, value in (('--counts', args.counts), ('--sequence_types', args.sequence_types)):
+    for flag, value in (('--counts', args.counts), ('--sequence_types', args.sequence_types),
+                        ('--start_residue_from', args.start_residue_from)):
         if value is not None and sequences is None:
             parser.error(f"{flag} requires --sequences (or --sequence).")
+    if args.start_residue_from is not None and args.start_residue_from < 1:
+        parser.error("--start_residue_from must be >= 1 (it is a residue number, 1-based).")
 
     if args.pdb_id is not None and supplied:
         parser.error(
@@ -190,6 +204,7 @@ def main():
             args.output_directory, args.wandb_key, args.wandb_project,
             reference_pdb=args.reference_pdb,
             counts=args.counts, sequence_types=args.sequence_types,
+            start_residue_from=args.start_residue_from,
             methyl_rdc_file=args.methyl_rdc_file, amide_rdc_file=args.amide_rdc_file,
             amide_relax_file=args.amide_relax_file, methyl_relax_file=args.methyl_relax_file,
         )
@@ -214,19 +229,27 @@ def main():
     output_directory = os.path.join(config.general.output_folder, config.general.name)
     diffusion_directory = os.path.join(output_directory, "diffusion_process")
     metrics_results_path = os.path.join(diffusion_directory, f"{identifier}_metrics.csv")
-    run_nmr_metrics(
-        pdb_output_folder=output_directory,
-        md_file=config.protein.reference_pdb,
-        restraint_file=config.loss_function.nmr_loss_function.reference_nmr,
-        add_hydrogen=True,
-        relax_colabfold=True,
-        results_path=metrics_results_path,
-        additional_protein_files=None,
-        order_params_files=None,
-        noe=True,
-        order_params=False,
-        pdb_id=identifier,
-    )
+    metrics_error = None
+    try:
+        run_nmr_metrics(
+            pdb_output_folder=output_directory,
+            md_file=config.protein.reference_pdb,
+            restraint_file=config.loss_function.nmr_loss_function.reference_nmr,
+            add_hydrogen=True,
+            relax_colabfold=True,
+            results_path=metrics_results_path,
+            additional_protein_files=None,
+            order_params_files=None,
+            noe=True,
+            order_params=False,
+            pdb_id=identifier,
+            start_residue_from=getattr(config.protein, 'start_residue_from', 1) or 1,
+        )
+    except Exception as error:
+        # Relaxed structures already exist, so still emit the ensemble below and re-raise
+        # afterwards rather than losing the run's primary output to a metrics failure.
+        metrics_error = error
+        print(f'ERROR: metrics failed ({type(error).__name__}: {error})')
 
     # Collapse the relaxed ensemble into a single multi-model PDB. Per-structure files
     # and their hydrogenated/relaxed derivatives stay under diffusion_process/verbose/.
@@ -242,6 +265,9 @@ def main():
             f"WARNING: no relaxed structures found in {verbose_directory}; "
             f"skipped writing the merged ensemble."
         )
+
+    if metrics_error is not None:
+        raise metrics_error
     print(f"Metrics -> {metrics_results_path}")
 
 

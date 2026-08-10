@@ -95,10 +95,24 @@ class NMRLossFunction(AbstractLossFunction):
         amide_relax_file=None,
         amide_relax_scale: float = 0.0,
         noe_scale: float = 1.0,
+        start_residue_from: int = 1,
     ):
         # restraints
         self.nmr_data = pd.read_csv(restraint_file)
         self.nmr_data = self.nmr_data[self.nmr_data["type"] == "NOE"].reset_index(drop=True)
+
+        # Restraint files keep their author numbering, which may not start at 1. The model
+        # topology is always 1..n over the supplied sequence, so shift once here and every
+        # atom lookup downstream works in sequence-index space.
+        self.start_residue_from = int(start_residue_from or 1)
+        self.residue_offset = self.start_residue_from - 1
+        if self.residue_offset:
+            self.nmr_data["residue1_num"] = self.nmr_data["residue1_num"].astype(int) - self.residue_offset
+            self.nmr_data["residue2_num"] = self.nmr_data["residue2_num"].astype(int) - self.residue_offset
+            print(
+                f"NMR restraints: shifted residue numbering by -{self.residue_offset} "
+                f"(start_residue_from={self.start_residue_from}) onto sequence indices 1..n"
+            )
 
         # bounds 
         self.nmr_data["lower_bound"] = self.nmr_data["lower_bound"].apply(lambda x: 0 if x == "." else x)

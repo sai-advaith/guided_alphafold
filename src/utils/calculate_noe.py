@@ -106,15 +106,33 @@ class CalculateNOE:
     - Totals are additive sums of nonzero (UB ∪ LB) over chains/pairs.
     """
 
-    def __init__(self, restraint_file: str, atom_array, device: torch.device):
+    def __init__(self, restraint_file: str, atom_array, device: torch.device, start_residue_from: int = 1):
         # Load restraints
         nmr = pd.read_csv(restraint_file)
         nmr = nmr[nmr["type"] == "NOE"].reset_index(drop=True)
+
+        # No residue-number shift here, deliberately. The structures being scored are read
+        # back from written PDBs, which save_structure_full() numbers in the author
+        # convention (start_residue_from..), the same convention the restraint file uses.
+        # Only the guidance loss needs a shift, because there the topology comes from the
+        # Protenix dataloader and is always indexed 1..n. start_residue_from is accepted so
+        # callers can pass it uniformly, and to assert that assumption below.
+        self.start_residue_from = int(start_residue_from or 1)
 
         # Topology & chains
         self.atom_array = atom_array
         self.device = device
         self.chain_ids, self.chain_indices = _equal_segments(atom_array)
+
+        if self.start_residue_from != 1 and len(atom_array):
+            observed_min = int(np.min(np.asarray(atom_array.res_id)))
+            if observed_min < self.start_residue_from:
+                print(
+                    f"WARNING: structures are numbered from residue {observed_min} but the "
+                    f"restraints assume numbering from {self.start_residue_from}. Restraints "
+                    f"will not match. This usually means the structures were written before "
+                    f"--start_residue_from was set; regenerate them."
+                )
 
         # Filter rows conservatively
         self.nmr_data = _prefilter_restraints(nmr, atom_array, self.chain_indices)
@@ -543,7 +561,17 @@ class CalculateNOE:
             viol_median[k] = np.median(v[v.nonzero()[0]])
             viol_mean[k] = np.mean(v[v.nonzero()[0]])
 
-        viol_percent = ensemble_score / self.total_constraints 
+        if self.total_constraints == 0:
+            # Nothing was evaluable, so a percentage is meaningless. Fail with the cause
+            # rather than a bare ZeroDivisionError from the line below.
+            raise ValueError(
+                "No restraints could be evaluated against the structures, so no metrics can "
+                "be computed. The usual cause is a residue-numbering mismatch between the "
+                "restraint file and the structures (check --start_residue_from), or a "
+                "reference structure whose atom set does not overlap the restraints. See the "
+                "'restraints are resolvable' warning above."
+            )
+        viol_percent = ensemble_score / self.total_constraints
         
 
         return {

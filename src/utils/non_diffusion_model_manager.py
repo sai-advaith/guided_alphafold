@@ -550,7 +550,7 @@ class ProtenixModelManager:
         gemmi_structure.write_pdb(write_file_name)
 
 
-def save_structure_full(structure, full_sequences, sequence_types, atom_array, write_file_name, bfactors=None, atom_mask=None):
+def save_structure_full(structure, full_sequences, sequence_types, atom_array, write_file_name, bfactors=None, atom_mask=None, start_residue_from=1):
     
     gemmi_structure = gemmi.Structure()
     model = gemmi.Model("1") 
@@ -572,7 +572,9 @@ def save_structure_full(structure, full_sequences, sequence_types, atom_array, w
         for i, res_name_one_letter in enumerate(sequence): # creating the residue
             res = gemmi.Residue()
             res.name =  gemmi.expand_one_letter(res_name_one_letter, SEQUENCE_TYPE_TO_RESIDUE_KIND[sequence_type]) 
-            res.seqid = gemmi.SeqId(i + 1, " ")
+            # Written in the caller's numbering, so output matches the restraint file's
+            # convention rather than exposing the internal 1..n sequence indexing.
+            res.seqid = gemmi.SeqId(i + int(start_residue_from or 1), " ")
             residue_has_atoms = False  # Track if this residue has any atoms
             
             # Every first residue of a dna or rna chain should have the OP3 atom
