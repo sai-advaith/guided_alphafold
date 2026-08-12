@@ -508,6 +508,51 @@ alignments. Two consequences:
   and shifts the random state before the first noise draw. When comparing runs, keep cache
   state consistent across every arm.
 
+#### pLDDT confidence scores
+
+`scripts/add_plddt_to_ensemble.py` annotates a finished ensemble with predicted pLDDT in
+the B-factor column, so confidence can be coloured directly in a viewer. Run it after the
+pipeline has produced the ensemble:
+
+```bash
+python3 scripts/add_plddt_to_ensemble.py \
+    --config generated_configurations/<id>_nmr_guided.yaml \
+    --ensemble <output_directory>/<id>_nmr_guided/diffusion_process/<id>_ensemble.pdb \
+    --csv <output_directory>/<id>_nmr_guided/diffusion_process/<id>_plddt.csv
+```
+
+**Required Parameters:**
+- `--config`: the generated config from the run. It supplies the sequence, the MSA and
+  trunk caches, the checkpoint, and `start_residue_from`, so the scores are produced under
+  exactly the conditions the run used.
+- `--ensemble`: the multi-model ensemble PDB to annotate.
+
+**Optional Parameters:**
+- `--output`: output path (default `<ensemble>_plddt.pdb`); the input is never modified
+- `--csv`: also write a per-model, per-residue mean pLDDT table
+- `--batch-size`: models scored per forward pass (default `4`); lower it if the confidence
+  head runs out of GPU memory
+- `--device`: compute device (default `cuda:0`)
+
+Every model is scored independently. **Heavy atoms receive their pLDDT (0-100); hydrogens
+are set to exactly 0**, since the confidence head does not predict them. Atoms are matched
+by `(chain, residue, atom name)` rather than by file order, because relaxation may permute
+atoms, and `start_residue_from` is honoured so author numbering lines up. If few atoms
+match, the script warns and names residue numbering as the likely cause; if none match it
+errors rather than writing a file full of zeros.
+
+A GPU is required — the script rebuilds the model to run the confidence head. It reuses the
+run's cached MSA and trunk embeddings, so this is much cheaper than the run itself.
+
+> **Interpretation.** The confidence head scores the heavy-atom coordinates you hand it,
+> evaluated against the sequence, MSA and trunk embeddings from the original run. It does
+> not see the hydrogens added during metrics, and the embeddings are not recomputed for the
+> relaxed geometry. Treat the values as the model's confidence in those coordinates, not as
+> a fresh end-to-end prediction of the relaxed structure. Note also that members of one
+> guided ensemble tend to score very similarly, so the per-model mean discriminates poorly
+> between them — the per-residue table from `--csv` is the more useful output for finding
+> which regions are least confident.
+
 ## Experiment Tracking
 
 The pipeline supports experiment tracking via Weights & Biases (wandb). To enable tracking:
