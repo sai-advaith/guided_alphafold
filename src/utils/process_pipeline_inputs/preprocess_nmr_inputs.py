@@ -790,7 +790,7 @@ def main(pdb_id, input_directory, output_directory, wandb_key, wandb_project, me
 
     # Prepare restraints for guidance
     df = extract_distance_restraints(reatraints_file_path, verbose=False)
-    restraints_csv_file_path = os.path.join(input_directory, "restraints", pdb_id, f"{pdb_id}.csv")
+    restraints_csv_file_path = os.path.join(input_directory, "restraints", pdb_id.lower(), f"{pdb_id}.csv")
     if df.shape[0] > 0:
         print(f"Found {df.shape[0]} distance restraints for {pdb_id}")
         print(df.groupby('type').size())
