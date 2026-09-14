@@ -2,6 +2,7 @@ from .aa_graphs import THREE_AAS_GRAPHS
 
 import requests
 import os
+from pathlib import Path
 import pandas as pd
 import pynmrstar
 import re
@@ -12,6 +13,9 @@ from openmm.app import PDBFile
 import pdbfixer
 from copy import deepcopy
 import shutil
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_NMR_BASELINE_CONFIG = REPO_ROOT / "pipeline_configurations" / "nmr_baseline.yaml"
 
 aa_map = {
     'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
@@ -69,7 +73,7 @@ def fix_pdb(pdb_file_path, pdb_id):
         dst_model.add_chain(dst_chain)
 
     new.add_model(dst_model)
-    new_pdb_file_path = os.path.join(dir_name, f"{pdb_id}_fixed.pdb")
+    new_pdb_file_path = os.path.join(dir_name, f"{pdb_id.lower()}_fixed.pdb")
     new.setup_entities()
     new.write_pdb(new_pdb_file_path)
 
@@ -376,12 +380,12 @@ def save_metadata(pdb_id, sequence, root):
     with open(metadata_file_path, 'w') as outfile:
         json.dump(metadata, outfile, indent=4)
 
-def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_directory,  wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None, baseline_config_file_path="pipeline_configurations/nmr_baseline.yaml"):
+def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_directory,  wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None, baseline_config_file_path=DEFAULT_NMR_BASELINE_CONFIG):
     configurations_folder = "generated_configurations"
     pdb_id = pdb_id.lower()
     os.makedirs(configurations_folder, exist_ok=True)
 
-    with open(baseline_config_file_path, "r") as f:
+    with Path(baseline_config_file_path).open("r") as f:
         config = yaml.safe_load(f)
 
     # Metadata
@@ -741,7 +745,7 @@ def main_from_custom_inputs(
 
 def main(pdb_id, input_directory, output_directory, wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None):
     # Input files
-    baseline_config_file_path="pipeline_configurations/nmr_baseline.yaml"
+    baseline_config_file_path = DEFAULT_NMR_BASELINE_CONFIG
     reatraints_file_path = download_nmr_restraints(pdb_id, input_directory)
     pdb_file_path = download_pdb_file(pdb_id, input_directory)
     fixed_pdb_file_path = fix_pdb(pdb_file_path, pdb_id)
@@ -790,7 +794,7 @@ def main(pdb_id, input_directory, output_directory, wandb_key, wandb_project, me
 
     # Prepare restraints for guidance
     df = extract_distance_restraints(reatraints_file_path, verbose=False)
-    restraints_csv_file_path = os.path.join(input_directory, "restraints", pdb_id.lower(), f"{pdb_id}.csv")
+    restraints_csv_file_path = os.path.join(input_directory, "restraints", pdb_id.lower(), f"{pdb_id.lower()}.csv")
     if df.shape[0] > 0:
         print(f"Found {df.shape[0]} distance restraints for {pdb_id}")
         print(df.groupby('type').size())

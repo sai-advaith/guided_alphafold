@@ -1,5 +1,6 @@
 import torch
 import os
+import sys
 import wandb
 from tqdm import tqdm
 import json
@@ -335,6 +336,7 @@ class ExperimentManager:
     def run_full_diffusion_process(self, latents):
         structures = latents.clone()
 
+        interactive_progress = sys.stderr.isatty()
         N = self.config.model_manager.diffusion_N
         if self.config.general.recycle_structures.should_recycle:
             A = self.config.general.recycle_structures.recycle_connection[0]
@@ -342,11 +344,14 @@ class ExperimentManager:
             R = self.config.general.recycle_structures.recycle_n_times
             
             total_steps = B + (R + 1) * (A - B) + (N - A) - 1
-            steps_generator = tqdm(range(total_steps), "running diffusion process")
+            steps_generator = tqdm(range(total_steps), "running diffusion process", disable=not interactive_progress)
             schedule = list(range(0,B)) + (R+1)*list(range(B,A)) + list(range(A,N))
         else:
-            steps_generator = tqdm(range(self.config.model_manager.diffusion_N), "running diffusion process")
+            steps_generator = tqdm(range(self.config.model_manager.diffusion_N), "running diffusion process", disable=not interactive_progress)
             schedule = list(range(N))
+            total_steps = len(schedule)
+        print(f"diffusion schedule: recycle={self.config.general.recycle_structures.should_recycle}, "
+                f"steps={len(schedule)}, total_steps={total_steps}", flush=True)
 
 
         structures_gradient_norm = self.config.diffusion_process.guidance.guidance_direction_scale_factor
@@ -379,7 +384,15 @@ class ExperimentManager:
                             meta={"diffusion_index": int(i)},
                         )
                     loss_value.backward()
-                    steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")                
+                    if interactive_progress:
+                        steps_generator.set_description(f"running diffusion process, loss: {loss_value.item():.5f}")
+                    elif step == 0 or (step + 1) % 10 == 0 or (step + 1) == total_steps:
+                        progress = (step + 1) / total_steps
+                        bar_width = 10
+                        filled = int(progress * bar_width)
+                        bar = "#" * filled + " " * (bar_width - filled)
+                        print(f"running diffusion process, loss: {loss_value.item():.5f} "
+                                f"{progress:>4.0%}|{bar}| {step + 1}/{total_steps}", flush=True)
                 
                     # Get guidance and add to structures (noisy variable)
                     with torch.no_grad():

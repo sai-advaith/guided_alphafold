@@ -337,7 +337,7 @@ def main(pdb_id, chain, root="pipeline_inputs"):
         fixer.findMissingResidues()
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
-        processed_file_path = f"{pdb_file_path.split('.')[0]}_fixed.pdb"
+        processed_file_path = f"{pdb_file_path.split('.')[0].lower()}_fixed.pdb"
         PDBFile.writeFile(fixer.topology, fixer.positions, open(processed_file_path, 'w'))
 
         source_structure = gemmi.read_pdb(pdb_file_path)

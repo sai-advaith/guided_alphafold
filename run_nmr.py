@@ -1,5 +1,6 @@
 import argparse
 import glob
+from pathlib import Path
 import os
 
 from experiment_manager import ExperimentManager
@@ -102,6 +103,7 @@ def main():
     )
     parser.add_argument('--input_directory', type=str, required=False, default="nmr_pipeline_inputs")
     parser.add_argument('--output_directory', type=str, required=False, default="nmr_pipeline_outputs")
+    parser.add_argument('--model_weights_path', type=str, default=os.environ.get("AF3_MODEL_WEIGHTS"), help="Path to the downloaded AF3 model weights.")
     parser.add_argument('--wandb_key', type=str, required=False, default=None)
     parser.add_argument('--wandb_project', type=str, required=False, default=None)
     parser.add_argument('--methyl_rdc_file', type=str, required=False, default=None)
@@ -196,6 +198,14 @@ def main():
 
     # Loading the config file and merging it with the arguments
     config = load_config(config_file_path)
+    # Update model weights path in config
+    if args.model_weights_path is not None:
+        model_weights_path = Path(args.model_weights_path).expanduser().resolve()
+        config.model_manager.model_checkpoint_path = str(model_weights_path)
+    # Confirm that model weights exist
+    if not Path(config.model_manager.model_checkpoint_path).exists():
+        raise FileNotFoundError(f"NMR-AF3) Model weights not found: {config.model_manager.model_checkpoint_path}\n"
+                "Provide it with --model_weights_path or set AF3_MODEL_WEIGHTS.")
 
     # Seeding the experiment (unchanged baseline reproducibility)
     ExperimentManager.seed_experiment(config.general.seed)
