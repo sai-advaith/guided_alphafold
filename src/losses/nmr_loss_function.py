@@ -61,6 +61,10 @@ def q_group_names(nmr_name: str, residue_name: str) -> List[str]:
         return ["HZ2"]
     if residue_name == "LYS" and nmr_name == "QZ":
         return ["HZ1", "HZ2", "HZ3"]
+    if residue_name == "ARG" and nmr_name == "QH1":
+        return ["HH11", "HH12"]
+    if residue_name == "ARG" and nmr_name == "QH2":
+        return ["HH21", "HH22"]
     raise ValueError("Unknown q hydrogen to pdb conversion")
 
 
