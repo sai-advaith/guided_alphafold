@@ -1,5 +1,6 @@
 from .aa_graphs import THREE_AAS_GRAPHS
 
+from collections import defaultdict
 import requests
 import os
 from pathlib import Path
@@ -395,6 +396,10 @@ def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_
 
     config["general"]["name"] = f"{pdb_id}_nmr_guided"
     config["general"]["output_folder"] = f"{output_directory}"
+    # Keep both MSA caches with the run's outputs rather than in the repo root, so a run is
+    # self-contained and separate output directories do not share alignments or embeddings.
+    config["model_manager"]["msa_save_dir"] = os.path.join(output_directory, "alignment_dir")
+    config["model_manager"]["msa_embedding_cache_dir"] = os.path.join(output_directory, "msa_cache")
 
     # Protein parameters
     config["protein"]["sequences"] = [{"count": 1, "sequence": metadata["seq"], "sequence_type": "proteinChain"}]
@@ -402,6 +407,9 @@ def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_
     config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = pdb_id
     config["protein"]["reference_raw_pdb_chain"] = "A"
+    # Residue number the first sequence position carries in the restraint file. Output
+    # PDBs are written in this numbering; the guidance loss shifts restraints to 1..n.
+    config["protein"]["start_residue_from"] = int(start_residue_from or 1)
     config["protein"]["reference_raw_pdb"] = f"{input_directory}/pdbs/{pdb_id}/{pdb_id}.pdb"
     config["protein"]["reference_pdb"] = f"{input_directory}/pdbs/{pdb_id}/{pdb_id}.pdb"
 
@@ -461,6 +469,76 @@ REQUIRED_RESTRAINT_COLUMNS = [
 ]
 
 
+def check_restraint_residue_numbering(df, sequences, start_residue_from=1, source=""):
+    """
+    Cross-check restraint residue numbering and names against the supplied sequence(s).
+
+    A wrong --start_residue_from shows up as widespread residue-name disagreement, so
+    that is treated as an error. Isolated disagreements are reported as warnings, since
+    real restraint files do contain occasional mislabelled residues.
+    """
+    offset = int(start_residue_from) - 1
+    longest = max(len(sequence) for sequence in sequences)
+    where = f" in {source}" if source else ""
+
+    observed = defaultdict(list)
+    for _, row in df.iterrows():
+        observed[int(row["residue1_num"])].append(str(row["residue1_id"]).upper())
+        observed[int(row["residue2_num"])].append(str(row["residue2_id"]).upper())
+
+    out_of_range = sorted(n for n in observed if not 1 <= n - offset <= longest)
+    if out_of_range:
+        raise ValueError(
+            f"Restraint file{where} references residue number(s) {out_of_range[:8]}"
+            f"{' ...' if len(out_of_range) > 8 else ''} which fall outside the sequence "
+            f"after applying --start_residue_from {start_residue_from} "
+            f"(valid file numbering is {1 + offset}..{longest + offset} for a "
+            f"{longest}-residue sequence). Check the offset."
+        )
+
+    # Compare against every supplied sequence and keep the best agreement, so a
+    # hetero-complex is not penalised for restraints belonging to its other chain.
+    best_matches, best_mismatches = -1, []
+    for sequence in sequences:
+        matches, mismatches = 0, []
+        for number, names in sorted(observed.items()):
+            index = number - offset
+            if not 1 <= index <= len(sequence):
+                continue
+            expected = gemmi.expand_one_letter(sequence[index - 1], gemmi.ResidueKind.AA)
+            observed_name = max(set(names), key=names.count)
+            if observed_name == expected:
+                matches += 1
+            else:
+                mismatches.append((number, observed_name, index, expected))
+        if matches > best_matches:
+            best_matches, best_mismatches = matches, mismatches
+
+    total = best_matches + len(best_mismatches)
+    if total and best_matches / total < 0.5:
+        detail = ", ".join(f"file {n}={g} but sequence[{i}]={e}" for n, g, i, e in best_mismatches[:5])
+        raise ValueError(
+            f"Restraint residue names disagree with the sequence for "
+            f"{len(best_mismatches)}/{total} residues{where} using "
+            f"--start_residue_from {start_residue_from}. This almost always means the "
+            f"offset is wrong. Examples: {detail}."
+        )
+    if best_mismatches:
+        print(
+            f"NOTE: {len(best_mismatches)}/{total} restraint residues disagree with the "
+            f"sequence name{where} (offset looks correct otherwise). Restraints are matched "
+            f"by residue number and atom name, so these still apply to the intended residue:"
+        )
+        for number, got, index, expected in best_mismatches[:8]:
+            print(f"  file residue {number} labelled {got}, sequence position {index} is {expected}")
+
+    print(
+        f"Residue numbering check: {best_matches}/{total} names agree with the sequence "
+        f"(start_residue_from={start_residue_from})."
+    )
+    return best_matches, best_mismatches
+
+
 def validate_restraint_csv(df, source=""):
     """
     Fail early and by name on a malformed restraint table.
@@ -510,12 +588,15 @@ def validate_restraint_csv(df, source=""):
     return noe.shape[0]
 
 
-def prepare_custom_restraints(restraints_path, conformation_id, input_directory):
+def prepare_custom_restraints(
+    restraints_path, conformation_id, input_directory, sequences=None, start_residue_from=1
+):
     """
     Normalize a user-supplied restraint file into the CSV the pipeline consumes.
 
-    Accepts either a CSV already in the documented schema, or a raw NMR-STAR
-    restraint file (.str/.mr) which is converted with extract_distance_restraints().
+    Accepts a CSV already in the documented schema, or a raw NMR-STAR restraint file
+    (.str/.mr) converted with extract_distance_restraints(). Residue numbering is
+    preserved as written; start_residue_from records how it maps onto the sequence.
     Returns the path to the CSV inside input_directory.
     """
     if not os.path.exists(restraints_path):
@@ -539,11 +620,18 @@ def prepare_custom_restraints(restraints_path, conformation_id, input_directory)
             )
     else:
         raise ValueError(
-            f"Unsupported restraint file extension '{extension}' for {restraints_path}. "
-            f"Expected .csv (pipeline schema) or .str/.mr (NMR-STAR)."
+            f"Unsupported restraint file '{restraints_path}' (extension '{extension}'). "
+            f"Restraints must be a .csv in the schema documented in the README, or a "
+            f".str/.mr NMR-STAR file. Convert other formats (CYANA .upl and similar) to "
+            f"the CSV schema first."
         )
 
     n_noe = validate_restraint_csv(df, source=restraints_path)
+    if sequences:
+        check_restraint_residue_numbering(
+            df[df["type"] == "NOE"], sequences,
+            start_residue_from=start_residue_from, source=restraints_path,
+        )
     df.to_csv(csv_path, index=False)
     print(f"Prepared {n_noe} NOE restraints for '{conformation_id}' -> {csv_path}")
     return csv_path
@@ -608,6 +696,7 @@ def create_nmr_configuration_file_from_custom_inputs(
     reference_pdb=None,
     counts=None,
     sequence_types=None,
+    start_residue_from=1,
     methyl_rdc_file=None,
     amide_rdc_file=None,
     amide_relax_file=None,
@@ -628,6 +717,10 @@ def create_nmr_configuration_file_from_custom_inputs(
 
     config["general"]["name"] = f"{conformation_id}_nmr_guided"
     config["general"]["output_folder"] = f"{output_directory}"
+    # Keep both MSA caches with the run's outputs rather than in the repo root, so a run is
+    # self-contained and separate output directories do not share alignments or embeddings.
+    config["model_manager"]["msa_save_dir"] = os.path.join(output_directory, "alignment_dir")
+    config["model_manager"]["msa_embedding_cache_dir"] = os.path.join(output_directory, "msa_cache")
 
     # Chain parameters. `sequence` may be a single string (one chain) or a list of
     # sequences, optionally with per-sequence counts and molecule types.
@@ -640,6 +733,9 @@ def create_nmr_configuration_file_from_custom_inputs(
     config["protein"]["assembly_identifier"] = None
     config["protein"]["pdb_id"] = conformation_id
     config["protein"]["reference_raw_pdb_chain"] = "A"
+    # Residue number the first sequence position carries in the restraint file. Output
+    # PDBs are written in this numbering; the guidance loss shifts restraints to 1..n.
+    config["protein"]["start_residue_from"] = int(start_residue_from or 1)
 
     # A reference structure is optional here: guidance needs only restraints, and the
     # topology comes from the sequence. When absent, metrics skip the MD comparison.
@@ -697,6 +793,7 @@ def main_from_custom_inputs(
     reference_pdb=None,
     counts=None,
     sequence_types=None,
+    start_residue_from=1,
     methyl_rdc_file=None,
     amide_rdc_file=None,
     amide_relax_file=None,
@@ -705,8 +802,10 @@ def main_from_custom_inputs(
     """Custom-input entry point: conformation id + sequence + restraint file."""
     baseline_config_file_path = "pipeline_configurations/nmr_baseline.yaml"
 
+    sequence_list = [sequence] if isinstance(sequence, str) else list(sequence)
     restraints_csv_path = prepare_custom_restraints(
-        restraints_path, conformation_id, input_directory
+        restraints_path, conformation_id, input_directory,
+        sequences=sequence_list, start_residue_from=start_residue_from or 1,
     )
 
     order_parameters_dir = os.path.join(input_directory, "order_parameters", conformation_id)
@@ -735,6 +834,7 @@ def main_from_custom_inputs(
         reference_pdb=reference_pdb,
         counts=counts,
         sequence_types=sequence_types,
+        start_residue_from=start_residue_from or 1,
         methyl_rdc_file=order_param_paths["methyl_rdc"],
         amide_rdc_file=order_param_paths["amide_rdc"],
         amide_relax_file=order_param_paths["amide_relax"],

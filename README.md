@@ -325,10 +325,11 @@ python3 run_nmr.py \
 **Required Parameters:**
 - `--conformation_id`: Identifier for this run, used for output naming in place of a PDB ID
 - `--sequences`: One-letter sequence per unique chain, space-separated (`--sequence` is a single-chain shorthand)
-- `--restraints`: Path to a restraint file — either a `.csv` in the [format below](#restraint-file-format), or a `.str`/`.mr` NMR-STAR file which is converted automatically
+- `--restraints`: Path to a restraint `.csv` in the [format below](#restraint-file-format) (a `.str`/`.mr` NMR-STAR file is also accepted and converted)
 
 **Optional Parameters:** all of the Mode 1 options, plus
 - `--counts`: Number of copies of each entry in `--sequences`. Defaults to `1` each.
+- `--start_residue_from`: Residue number that the **first** residue of `--sequences` carries in your restraint file. Defaults to `1`. See [Residue numbering](#residue-numbering).
 - `--sequence_types`: Molecule type per entry in `--sequences` — `proteinChain`, `rnaSequence` or `dnaSequence`. Defaults to all `proteinChain`.
 - `--reference_pdb`: Reference structure to compare against. When supplied, the metrics table gains an `MD` row alongside the guided row; when omitted, metrics are guided-only.
 
@@ -403,10 +404,11 @@ keeping only the first chain.
 
 #### Restraint file format
 
-A restraint CSV is what an NMR-STAR `_mr.str` file becomes after conversion, and is what
-both the guidance loss and the metrics read. Columns are looked up by name, so their
-order does not matter. Passing a `.str`/`.mr` file to `--restraints` produces this
-automatically; the schema is documented for hand-built or externally generated files.
+`--restraints` takes a **CSV** in the schema below. A raw NMR-STAR `.str`/`.mr` file is
+also accepted and converted automatically. Any other format — CYANA `.upl` and similar —
+must be converted to this schema first.
+
+The schema is what both the guidance loss and the metrics read. Columns are looked up by name, so their order does not matter.
 
 **Required columns**
 
@@ -450,19 +452,106 @@ NOE,2,5,TYR,QD,21,ALA,MB,1.8,4.0
 Malformed files are rejected up front with a message naming the offending column,
 rather than failing later inside the loss.
 
+#### Residue numbering
+
+`residue1_num`/`residue2_num` are interpreted as **1-based indices into the sequence you
+pass**. Restraint files often use author numbering that starts elsewhere — a construct
+whose sequence you supply as residues 1..121 might be numbered 157..277 in the restraints.
+Declare that offset:
+
+```bash
+python3 run_nmr.py --conformation_id my_conf \
+    --sequences FASEEANKKFRQMFKPLAPNTRLITDYFCYFHRE... \
+    --restraints backbone_restraints.csv \
+    --start_residue_from 157
+```
+
+Restraint files keep their own numbering on disk; the offset is applied where it matters:
+the guidance loss shifts restraints onto sequence indices internally, and **output PDBs are
+written back in your numbering**, so nothing user-facing shows the internal 1..n indexing.
+
+The offset is validated against your sequence. Because restraint files carry residue
+names, a wrong `--start_residue_from` shows up as widespread name disagreement and is
+rejected outright; residue numbers falling outside the sequence are rejected too.
+Isolated disagreements — real files do contain the odd mislabelled residue — are reported
+as notes and do not stop the run, since restraints are matched by residue number and atom
+name rather than by name.
+
 #### NMR output layout
 
 Both modes write:
 
 ```
-<output_directory>/<id>_nmr_guided/diffusion_process/
-├── <id>_ensemble.pdb    # the ensemble: every relaxed structure as one MODEL
-├── <id>_metrics.csv     # NOE violation metrics
-└── verbose/             # per-structure intermediates (raw, _hyd_added, _colab_relaxed)
+<output_directory>/
+├── alignment_dir/       # MSA alignments, one subdirectory per identifier
+├── msa_cache/           # cached pairformer trunk embeddings
+└── <id>_nmr_guided/
+    └── diffusion_process/
+        ├── <id>_ensemble.pdb    # the ensemble: every relaxed structure as one MODEL
+        ├── <id>_metrics.csv     # NOE violation metrics
+        └── verbose/             # per-structure intermediates (raw, _hyd_added, _colab_relaxed)
 ```
 
-`<id>_ensemble.pdb` is the primary output. The per-structure files and their
-hydrogenated and relaxed derivatives are kept under `verbose/`.
+`<id>_ensemble.pdb` is the primary output — every relaxed structure as one `MODEL`,
+readable directly by PyMOL, Chimera or MDAnalysis. The per-structure files and their
+hydrogenated and relaxed derivatives are kept under `verbose/`. Residue numbering follows
+`--start_residue_from` throughout, including after AMBER relaxation.
+
+`alignment_dir/` and `msa_cache/` live inside `--output_directory` (they used to sit in the
+repository root), so a run is self-contained and separate output directories do not share
+alignments. Two consequences:
+
+- Reusing an MSA across runs means reusing the same `--output_directory`, or copying
+  `alignment_dir/<id>/` across. Alignments are expensive to regenerate, so prefer reuse.
+- A fresh `--output_directory` starts with a cold `msa_cache`, and whether that cache is
+  warm changes the sampled ensemble even at a fixed seed: a cache hit skips the pairformer
+  and shifts the random state before the first noise draw. When comparing runs, keep cache
+  state consistent across every arm.
+
+#### pLDDT confidence scores
+
+`scripts/add_plddt_to_ensemble.py` annotates a finished ensemble with predicted pLDDT in
+the B-factor column, so confidence can be coloured directly in a viewer. Run it after the
+pipeline has produced the ensemble:
+
+```bash
+python3 scripts/add_plddt_to_ensemble.py \
+    --config generated_configurations/<id>_nmr_guided.yaml \
+    --ensemble <output_directory>/<id>_nmr_guided/diffusion_process/<id>_ensemble.pdb \
+    --csv <output_directory>/<id>_nmr_guided/diffusion_process/<id>_plddt.csv
+```
+
+**Required Parameters:**
+- `--config`: the generated config from the run. It supplies the sequence, the MSA and
+  trunk caches, the checkpoint, and `start_residue_from`, so the scores are produced under
+  exactly the conditions the run used.
+- `--ensemble`: the multi-model ensemble PDB to annotate.
+
+**Optional Parameters:**
+- `--output`: output path (default `<ensemble>_plddt.pdb`); the input is never modified
+- `--csv`: also write a per-model, per-residue mean pLDDT table
+- `--batch-size`: models scored per forward pass (default `4`); lower it if the confidence
+  head runs out of GPU memory
+- `--device`: compute device (default `cuda:0`)
+
+Every model is scored independently. **Heavy atoms receive their pLDDT (0-100); hydrogens
+are set to exactly 0**, since the confidence head does not predict them. Atoms are matched
+by `(chain, residue, atom name)` rather than by file order, because relaxation may permute
+atoms, and `start_residue_from` is honoured so author numbering lines up. If few atoms
+match, the script warns and names residue numbering as the likely cause; if none match it
+errors rather than writing a file full of zeros.
+
+A GPU is required — the script rebuilds the model to run the confidence head. It reuses the
+run's cached MSA and trunk embeddings, so this is much cheaper than the run itself.
+
+> **Interpretation.** The confidence head scores the heavy-atom coordinates you hand it,
+> evaluated against the sequence, MSA and trunk embeddings from the original run. It does
+> not see the hydrogens added during metrics, and the embeddings are not recomputed for the
+> relaxed geometry. Treat the values as the model's confidence in those coordinates, not as
+> a fresh end-to-end prediction of the relaxed structure. Note also that members of one
+> guided ensemble tend to score very similarly, so the per-model mean discriminates poorly
+> between them — the per-residue table from `--csv` is the more useful output for finding
+> which regions are least confident.
 
 ## Experiment Tracking
 
