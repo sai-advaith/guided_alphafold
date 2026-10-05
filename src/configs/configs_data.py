@@ -15,6 +15,7 @@
 # pylint: disable=C0114,C0301
 import os
 from copy import deepcopy
+from pathlib import Path
 
 from ..protenix.config.extend_types import GlobalConfigValue, ListValue
 
@@ -60,7 +61,13 @@ default_weighted_pdb_configs = {
     "shuffle_sym_ids": GlobalConfigValue("train_shuffle_sym_ids"),
 }
 
-DATA_ROOT_DIR = "src/af3-dev/release_data/"
+AF3_RELEASE_DATA = os.environ.get("AF3_RELEASE_DATA")
+
+if AF3_RELEASE_DATA:
+    DATA_ROOT_DIR = Path(AF3_RELEASE_DATA).expanduser().resolve()
+else:
+    DATA_ROOT_DIR = "src/af3-dev/release_data/"
+
 CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "components.v20240608.cif")
 CCD_COMPONENTS_RDKIT_MOL_FILE_PATH = os.path.join(
     DATA_ROOT_DIR, "components.v20240608.cif.rdkit_mol.pkl"
@@ -190,6 +197,6 @@ data_configs = {
     "template": {
         "enable": False,
     },
-    "ccd_components_file": CCD_COMPONENTS_FILE_PATH,
-    "ccd_components_rdkit_mol_file": CCD_COMPONENTS_RDKIT_MOL_FILE_PATH,
+    "ccd_components_file": str(CCD_COMPONENTS_FILE_PATH),
+    "ccd_components_rdkit_mol_file": str(CCD_COMPONENTS_RDKIT_MOL_FILE_PATH),
 }

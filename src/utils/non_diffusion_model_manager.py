@@ -319,7 +319,9 @@ class ProtenixModelManager:
     def _setup(self, device=None):
         configs = self._generate_configs(device)
         dataloader = get_inference_dataloader(configs=configs, msa_configuration=self._generate_msa_configuration())
-        self.eval_data_dict, self.atom_array, _ = next(iter(dataloader))[0]
+        self.eval_data_dict, self.atom_array, error_msg = next(iter(dataloader))[0]
+        if error_msg:
+            raise RuntimeError(f"Inference data featurization failed, {error_msg}")
         if self.reference_pdb is None and self.resolved_pdb_to_full_mask.shape[0] != self.atom_array.shape[0]:
             # Sequence-derived mask sizing must agree with the dataloader topology, or
             # every downstream mask is silently misaligned against the coordinates.
