@@ -367,20 +367,24 @@ class NMRLossFunction(AbstractLossFunction):
         B = torch.stack(atoms2, dim=0).permute(1, 0, 2)  # (B, K, 3)
         return A, B
 
+    def _or_group_index(self, batch_size: int, mask: torch.Tensor, within_chain: bool) -> Tuple[int, torch.Tensor]:
+        """Number of OR groups, and the (B, K_selected) OR-group index of each selected row."""
+        unique_or = self.within_chain_unique_or if within_chain else self.multi_chain_unique_or
+        inverse_or_indices = self.within_chain_inverse_or_indices if within_chain else self.multi_chain_inverse_or_indices
+        reduced_mask = mask[self.single_chain_mask_np] if within_chain else mask[self.multi_chain_mask_np]
+        inv_idx = inverse_or_indices[None].repeat(batch_size, 1)[..., reduced_mask]
+        return len(unique_or), inv_idx
+
     def _integrate_or_conditions(self, curr_loss: torch.Tensor, mask: torch.Tensor, within_chain: bool) -> torch.Tensor:
         """Reduce per-constraint losses into per-OR-group minima."""
         # curr_loss: (B, K_selected)
-        unique_or = self.within_chain_unique_or if within_chain else self.multi_chain_unique_or
+        n_groups, inv_idx = self._or_group_index(curr_loss.shape[0], mask, within_chain)
         min_vals = torch.zeros(
-            (curr_loss.shape[0], len(unique_or)),
+            (curr_loss.shape[0], n_groups),
             dtype=curr_loss.dtype,
             device=curr_loss.device,
         )
-        inverse_or_indices = self.within_chain_inverse_or_indices if within_chain else self.multi_chain_inverse_or_indices
-        inv_idx = inverse_or_indices[None].repeat(curr_loss.shape[0], 1)
-        dim = 1
-        reduced_mask = mask[self.single_chain_mask_np] if within_chain else mask[self.multi_chain_mask_np]
-        return torch.scatter_reduce(min_vals, dim, inv_idx[..., reduced_mask], curr_loss, reduce="amin", include_self=False)
+        return torch.scatter_reduce(min_vals, 1, inv_idx, curr_loss, reduce="amin", include_self=False)
 
     def _compute_bound_losses(self, dist: torch.Tensor, mask: torch.Tensor, within_chain: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute lb/ub hinge losses and apply OR-group reduction."""
@@ -388,8 +392,20 @@ class NMRLossFunction(AbstractLossFunction):
         ub = torch.relu(dist - self.upper_bound[None][:, mask])
         lb = torch.relu(self.lower_bound[None][:, mask] - dist)
 
-        ub_or = self._integrate_or_conditions(ub, mask, within_chain)
-        lb_or = self._integrate_or_conditions(lb, mask, within_chain)
+        # An OR group is satisfied when one member lies inside [lb, ub], so the group takes
+        # the member with the smallest combined violation. Reducing ub and lb separately
+        # would let one member satisfy ub while a different member satisfies lb.
+        viol_or = self._integrate_or_conditions(ub + lb, mask, within_chain)
+
+        # Split the selected member's violation into its ub and lb parts. On a tie, the
+        # member with the smaller ub violation is taken; lb_or is the remainder, so
+        # ub_or + lb_or == viol_or exactly and the gradient is that of viol_or.
+        _, inv_idx = self._or_group_index(dist.shape[0], mask, within_chain)
+        is_selected = (ub + lb) <= viol_or.gather(1, inv_idx)
+        ub_or = self._integrate_or_conditions(
+            torch.where(is_selected, ub, torch.full_like(ub, float("inf"))), mask, within_chain
+        )
+        lb_or = viol_or - ub_or
 
         return ub_or.mean(), lb_or.mean(), ub_or, lb_or
 
