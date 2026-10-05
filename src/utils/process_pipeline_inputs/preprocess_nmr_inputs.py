@@ -381,7 +381,7 @@ def save_metadata(pdb_id, sequence, root):
     with open(metadata_file_path, 'w') as outfile:
         json.dump(metadata, outfile, indent=4)
 
-def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_directory,  wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None, baseline_config_file_path=DEFAULT_NMR_BASELINE_CONFIG):
+def create_nmr_configuration_file_from_baseline(pdb_id, input_directory, output_directory,  wandb_key, wandb_project, methyl_rdc_file=None, amide_rdc_file=None, amide_relax_file=None, methyl_relax_file=None, baseline_config_file_path=DEFAULT_NMR_BASELINE_CONFIG, start_residue_from=1):
     configurations_folder = "generated_configurations"
     pdb_id = pdb_id.lower()
     os.makedirs(configurations_folder, exist_ok=True)
