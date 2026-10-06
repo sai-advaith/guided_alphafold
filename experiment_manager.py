@@ -175,6 +175,7 @@ class ExperimentManager:
                                                         methyl_rdc_file=noe_config.methyl_rdc_file,
                                                         noe_scale=noe_config.noe_scale,
                                                         # op_n_bootstrap=noe_config.op_n_bootstrap,
+                                                        start_residue_from=getattr(self.config.protein, "start_residue_from", 1) or 1,
                                                         iid_loss=noe_config.iid_loss)
                 loss_functions.append(loss_function)
                 self.nmr_loss_function = loss_function
@@ -320,6 +321,7 @@ class ExperimentManager:
                     self.model_manager.atom_array,
                     os.path.join(verbose_path, f"{name}_{i}.pdb"),
                     bfactors=None,
+                    start_residue_from=getattr(self.config.protein, "start_residue_from", 1) or 1,
                 )
         else:
             raise ValueError(f"The loss function type {self.config.loss_function.loss_function_type} is not a valid option")

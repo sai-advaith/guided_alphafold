@@ -175,7 +175,7 @@ def reorder_atom_arrays(configs_lst, non_alph_struct):
 
     
 
-def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdbs_output_folder, md_file_path, order_params_files=None, pdb_id=None):
+def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdbs_output_folder, md_file_path, order_params_files=None, pdb_id=None, start_residue_from=1):
     # pdb_id is passed explicitly so a custom identifier is reported instead of the
     # restraint file's basename; fall back to the old behaviour when not supplied.
     if pdb_id is None:
@@ -234,7 +234,7 @@ def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_pr
             print(f'key: {k}  pdb_id: {pdb_id}  name: {config["name"]}') 
             
             if k == "noe":
-                calculator = CalculateNOE(file, config["intersected_atom_array"][0], device)      
+                calculator = CalculateNOE(file, config["intersected_atom_array"][0], device, start_residue_from=start_residue_from)      
                 res_dict.update(calculator.run(intersected_structures))
             elif k == "s2":
                 if not order_params_files:
@@ -248,8 +248,8 @@ def process_file(file, add_hydrogen, relax_colabfold, evaluations, additional_pr
 
 
 
-def run_nmr_metrics(pdb_output_folder, md_file, restraint_file, add_hydrogen, relax_colabfold, results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False, pdb_id=None):
+def run_nmr_metrics(pdb_output_folder, md_file, restraint_file, add_hydrogen, relax_colabfold, results_path, additional_protein_files=None, order_params_files=None, noe=True, order_params=False, pdb_id=None, start_residue_from=1):
     evaluations = {"noe": noe, "s2": order_params}
-    results = process_file(restraint_file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdb_output_folder, md_file, order_params_files, pdb_id=pdb_id)
+    results = process_file(restraint_file, add_hydrogen, relax_colabfold, evaluations, additional_protein_files, pdb_output_folder, md_file, order_params_files, pdb_id=pdb_id, start_residue_from=start_residue_from)
     results = pd.DataFrame(results)
     results.to_csv(results_path, index=False)

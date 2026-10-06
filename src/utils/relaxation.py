@@ -115,6 +115,41 @@ def fix_met_to_mse_based_on_reference(reference_pdb, target_pdb):
                 atom.element = gemmi.Element('Se')
   target_structure.write_pdb(target_pdb)
 
+def restore_residue_numbering(reference_pdb, target_pdb):
+    """
+    Copy residue numbering from reference_pdb onto target_pdb, residue by residue.
+
+    AMBER relaxation rebuilds the topology and renumbers residues from 1, discarding any
+    author numbering the input carried. That silently breaks anything keyed on residue
+    number downstream -- restraint matching in particular. Relaxation preserves residue
+    order and count, so positional copying is safe; if the counts disagree we leave the
+    file alone rather than corrupt it.
+    """
+    # read_pdb, not read_structure: read_structure infers the format from the file
+    # extension, and this is called on the atomic-write temp path (".pdb.tmp").
+    reference = gemmi.read_pdb(reference_pdb)
+    target = gemmi.read_pdb(target_pdb)
+
+    reference_residues = [residue for chain in reference[0] for residue in chain]
+    target_residues = [residue for chain in target[0] for residue in chain]
+    if len(reference_residues) != len(target_residues):
+        print(
+            f"WARNING: cannot restore residue numbering for {target_pdb}: "
+            f"{len(reference_residues)} residues in {reference_pdb} vs "
+            f"{len(target_residues)} after relaxation. Numbering left as written."
+        )
+        return False
+
+    changed = False
+    for reference_residue, target_residue in zip(reference_residues, target_residues):
+        if target_residue.seqid.num != reference_residue.seqid.num:
+            changed = True
+        target_residue.seqid = reference_residue.seqid
+    if changed:
+        target.write_pdb(target_pdb)
+    return changed
+
+
 def relax_pdb(pdb_in, pdb_out, max_iterations=2000, tolerance=2.39, stiffness=10.0, use_gpu=False, reorder_atoms=True):
     # Build into a temp path and only publish pdb_out on success. Callers such as
     # nmr_metrics.ensure_relaxed() treat the presence of pdb_out as "already relaxed",
@@ -147,6 +182,9 @@ def relax_pdb(pdb_in, pdb_out, max_iterations=2000, tolerance=2.39, stiffness=10
       with open(tmp_out, 'w') as f:
           f.write(relaxed_pdb_lines)
       fix_met_to_mse_based_on_reference(pdb_in, tmp_out)
+      # Relaxation renumbers residues from 1; put the input's numbering back so author
+      # numbering survives into the relaxed output and the metrics can match restraints.
+      restore_residue_numbering(pdb_in, tmp_out)
       if reorder_atoms:
         reorder_pdb_atoms(pdb_in, tmp_out) # for some reason it changes the atom order in the pdb, and that can cause bugs
       os.replace(tmp_out, pdb_out) # atomic: pdb_out is either absent or fully relaxed
